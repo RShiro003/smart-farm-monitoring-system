@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request, render_template
+from flask import Flask, jsonify, request, redirect
 import json
 import os
 from datetime import datetime
@@ -22,7 +22,8 @@ def load_sensor_data():
 
 
 def save_sensor_data(data):
-    os.makedirs("data", exist_ok=True)
+    # 실행 위치가 어디든 app/data 폴더에 저장되도록 수정
+    os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
 
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
@@ -30,6 +31,13 @@ def save_sensor_data(data):
 
 @app.route("/")
 def home():
+    # http://라즈베리파이IP:5000 으로 접속하면 대시보드로 이동
+    return redirect("/dashboard")
+
+
+@app.route("/api/status", methods=["GET"])
+def status():
+    # 기존 / 에서 보여주던 서버 상태 확인용 JSON
     data = load_sensor_data()
     latest = data[-1] if data else None
 
@@ -70,7 +78,7 @@ def receive_sensor_data():
         f"temp={new_data.get('temperature')} "
         f"hum={new_data.get('humidity')} "
         f"soil={new_data.get('soil_moisture')} "
-        f"light={new_data.get('light_digital')}"
+        f"light={new_data.get('light_digital') or new_data.get('light')}"
     )
 
     return jsonify({
