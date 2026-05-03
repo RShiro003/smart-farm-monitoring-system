@@ -2,19 +2,530 @@
 <html lang="ko">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Smart Farm Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Segoe UI', sans-serif;
+            background: #0f172a;
+            color: #e2e8f0;
+            min-height: 100vh;
+        }
+
+        /* ── Header ── */
+        header {
+            background: #1e293b;
+            border-bottom: 1px solid #334155;
+            padding: 0 32px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            height: 60px;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .header-title {
+            font-size: 1.15rem;
+            font-weight: 700;
+            color: #f1f5f9;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .farm-tabs {
+            display: flex;
+            gap: 6px;
+        }
+
+        .farm-tab {
+            padding: 6px 16px;
+            border: 1px solid #334155;
+            border-radius: 8px;
+            background: transparent;
+            color: #94a3b8;
+            cursor: pointer;
+            font-size: 0.82rem;
+            font-weight: 500;
+            text-decoration: none;
+            transition: all 0.15s;
+        }
+
+        .farm-tab:hover { border-color: #4ade80; color: #4ade80; }
+
+        .farm-tab.active {
+            background: #4ade80;
+            border-color: #4ade80;
+            color: #0f172a;
+            font-weight: 700;
+        }
+
+        /* ── Layout ── */
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 28px 20px 48px;
+            display: flex;
+            flex-direction: column;
+            gap: 32px;
+        }
+
+        section { display: flex; flex-direction: column; gap: 14px; }
+
+        .section-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+        }
+
+        .section-title {
+            font-size: 0.72rem;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            color: #64748b;
+            font-weight: 700;
+        }
+
+        /* ── Toggle buttons ── */
+        .toggle-group {
+            display: flex;
+            gap: 3px;
+            background: #0f172a;
+            padding: 3px;
+            border-radius: 8px;
+            border: 1px solid #1e293b;
+        }
+
+        .toggle-group button {
+            padding: 5px 14px;
+            border: none;
+            border-radius: 6px;
+            background: transparent;
+            color: #64748b;
+            cursor: pointer;
+            font-size: 0.78rem;
+            font-weight: 600;
+            transition: all 0.15s;
+        }
+
+        .toggle-group button:hover { color: #cbd5e1; }
+
+        .toggle-group button.active {
+            background: #1e293b;
+            color: #f1f5f9;
+        }
+
+        /* ── Sensor cards ── */
+        .cards {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 14px;
+        }
+
+        .card {
+            background: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 12px;
+            padding: 18px 22px;
+        }
+
+        .card .label { font-size: 0.78rem; color: #64748b; margin-bottom: 10px; font-weight: 600; }
+
+        .card .value { font-size: 2rem; font-weight: 700; line-height: 1; }
+
+        .card .unit { font-size: 0.95rem; font-weight: 400; color: #94a3b8; margin-left: 3px; }
+
+        .card .sub { margin-top: 8px; font-size: 0.7rem; color: #475569; }
+
+        .card.temp  .value { color: #f97316; }
+        .card.hum   .value { color: #38bdf8; }
+        .card.soil  .value { color: #4ade80; }
+        .card.light .value { color: #facc15; }
+
+        /* ── Charts ── */
+        .chart-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 14px;
+        }
+
+        @media (max-width: 720px) {
+            .chart-grid { grid-template-columns: 1fr; }
+            .farm-tabs { gap: 4px; }
+            .farm-tab { padding: 5px 10px; font-size: 0.75rem; }
+        }
+
+        .chart-card {
+            background: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 12px;
+            padding: 18px 20px 14px;
+        }
+
+        .chart-card-title {
+            font-size: 0.78rem;
+            color: #94a3b8;
+            font-weight: 600;
+            margin-bottom: 14px;
+        }
+
+        /* ── Table ── */
+        .table-wrap {
+            background: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 12px;
+            overflow: hidden;
+        }
+
+        table { width: 100%; border-collapse: collapse; font-size: 0.84rem; }
+
+        thead tr { background: #0f172a; }
+
+        th {
+            padding: 11px 14px;
+            text-align: left;
+            color: #64748b;
+            font-weight: 700;
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            border-bottom: 1px solid #334155;
+            white-space: nowrap;
+        }
+
+        td {
+            padding: 10px 14px;
+            border-bottom: 1px solid #0f172a;
+            color: #cbd5e1;
+        }
+
+        tbody tr:hover { background: #263347; }
+        tbody tr:last-child td { border-bottom: none; }
+
+        td.temp-val  { color: #f97316; font-weight: 600; }
+        td.hum-val   { color: #38bdf8; font-weight: 600; }
+        td.soil-val  { color: #4ade80; font-weight: 600; }
+        td.light-val { color: #facc15; font-weight: 600; }
+
+        /* ── No data ── */
+        .no-data {
+            background: #1e293b;
+            border: 1px dashed #334155;
+            border-radius: 12px;
+            padding: 36px;
+            text-align: center;
+            color: #475569;
+            font-size: 0.9rem;
+        }
+
+        /* ── Loading spinner ── */
+        .loading { color: #475569; font-size: 0.8rem; padding: 8px 0; }
+    </style>
 </head>
 <body>
-    <h1>Smart Farm Dashboard</h1>
 
-    {% if latest %}
-        <p><strong>시간:</strong> {{ latest.time }}</p>
-        <p><strong>온도:</strong> {{ latest.temperature }} °C</p>
-        <p><strong>습도:</strong> {{ latest.humidity }} %</p>
-        <p><strong>토양수분:</strong> {{ latest.soil_moisture }} %</p>
-        <p><strong>조도:</strong> {{ latest.light }}</p>
-    {% else %}
-        <p>데이터가 없습니다.</p>
-    {% endif %}
+<header>
+    <div class="header-title">🌱 Smart Farm</div>
+    <div class="farm-tabs">
+        {% for farm in farms %}
+        <a href="/dashboard?farm={{ farm.id }}"
+           class="farm-tab {% if farm.id == current_farm %}active{% endif %}">
+            {{ farm.name }}
+        </a>
+        {% endfor %}
+    </div>
+</header>
+
+<div class="container">
+
+    <!-- ── 현재 센서 값 ── -->
+    <section>
+        <div class="section-header">
+            <div class="section-title">현재 센서 값</div>
+            {% if latest %}
+            <div style="font-size:0.72rem;color:#475569;">
+                마지막 수신:
+                {% if latest.server_received_at %}{{ latest.server_received_at }}
+                {% elif latest.time %}{{ latest.time }}
+                {% else %}—{% endif %}
+            </div>
+            {% endif %}
+        </div>
+
+        {% if latest %}
+        <div class="cards">
+            <div class="card temp">
+                <div class="label">온도</div>
+                <div class="value">
+                    {{ latest.temperature if latest.temperature is not none else '—' }}<span class="unit">°C</span>
+                </div>
+            </div>
+            <div class="card hum">
+                <div class="label">습도</div>
+                <div class="value">
+                    {{ latest.humidity if latest.humidity is not none else '—' }}<span class="unit">%</span>
+                </div>
+            </div>
+            <div class="card soil">
+                <div class="label">토양 수분</div>
+                <div class="value">
+                    {{ latest.soil_moisture if latest.soil_moisture is not none else '—' }}<span class="unit">%</span>
+                </div>
+            </div>
+            <div class="card light">
+                <div class="label">조도</div>
+                <div class="value">
+                    {% if latest.light is not none %}{{ latest.light }}
+                    {% elif latest.light_digital is not none %}{{ latest.light_digital }}
+                    {% else %}—{% endif %}<span class="unit">lux</span>
+                </div>
+            </div>
+        </div>
+        {% else %}
+        <div class="no-data">센서 데이터가 없습니다.</div>
+        {% endif %}
+    </section>
+
+    <!-- ── 기간별 평균 ── -->
+    <section>
+        <div class="section-header">
+            <div class="section-title">기간별 평균</div>
+            <div class="toggle-group">
+                <button id="avg-btn-daily"   class="active" onclick="setAvgPeriod('daily',   this)">일간</button>
+                <button id="avg-btn-weekly"           onclick="setAvgPeriod('weekly',  this)">주간</button>
+                <button id="avg-btn-monthly"          onclick="setAvgPeriod('monthly', this)">월간</button>
+            </div>
+        </div>
+        <div class="cards">
+            <div class="card temp">
+                <div class="label">온도 평균</div>
+                <div class="value"><span id="avg-temp">…</span><span class="unit">°C</span></div>
+                <div class="sub" id="avg-temp-sub"></div>
+            </div>
+            <div class="card hum">
+                <div class="label">습도 평균</div>
+                <div class="value"><span id="avg-hum">…</span><span class="unit">%</span></div>
+            </div>
+            <div class="card soil">
+                <div class="label">토양수분 평균</div>
+                <div class="value"><span id="avg-soil">…</span><span class="unit">%</span></div>
+            </div>
+            <div class="card light">
+                <div class="label">조도 평균</div>
+                <div class="value"><span id="avg-light">…</span><span class="unit">lux</span></div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ── 데이터 추이 차트 ── -->
+    <section>
+        <div class="section-header">
+            <div class="section-title">데이터 추이</div>
+            <div class="toggle-group">
+                <button id="chart-btn-hourly"  class="active" onclick="setChartPeriod('hourly',  this)">시간별</button>
+                <button id="chart-btn-daily"               onclick="setChartPeriod('daily',   this)">일간</button>
+                <button id="chart-btn-weekly"              onclick="setChartPeriod('weekly',  this)">주간</button>
+                <button id="chart-btn-monthly"             onclick="setChartPeriod('monthly', this)">월간</button>
+            </div>
+        </div>
+        <div class="chart-grid">
+            <div class="chart-card">
+                <div class="chart-card-title">온도 (°C)</div>
+                <canvas id="tempChart"></canvas>
+            </div>
+            <div class="chart-card">
+                <div class="chart-card-title">습도 (%)</div>
+                <canvas id="humChart"></canvas>
+            </div>
+            <div class="chart-card">
+                <div class="chart-card-title">토양 수분 (%)</div>
+                <canvas id="soilChart"></canvas>
+            </div>
+            <div class="chart-card">
+                <div class="chart-card-title">조도 (lux)</div>
+                <canvas id="lightChart"></canvas>
+            </div>
+        </div>
+    </section>
+
+    <!-- ── 전체 기록 ── -->
+    <section>
+        <div class="section-title">전체 기록 ({{ history | length }}건)</div>
+        {% if history %}
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>수신 시각</th>
+                        <th>디바이스</th>
+                        <th>온도 (°C)</th>
+                        <th>습도 (%)</th>
+                        <th>토양수분 (%)</th>
+                        <th>조도</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in history %}
+                    <tr>
+                        <td style="color:#475569">{{ loop.index }}</td>
+                        <td>
+                            {% if row.server_received_at %}{{ row.server_received_at }}
+                            {% elif row.time %}{{ row.time }}
+                            {% else %}—{% endif %}
+                        </td>
+                        <td>{{ row.device_id if row.device_id else '—' }}</td>
+                        <td class="temp-val">{{ row.temperature if row.temperature is not none else '—' }}</td>
+                        <td class="hum-val">{{ row.humidity if row.humidity is not none else '—' }}</td>
+                        <td class="soil-val">{{ row.soil_moisture if row.soil_moisture is not none else '—' }}</td>
+                        <td class="light-val">
+                            {% if row.light is not none %}{{ row.light }}
+                            {% elif row.light_digital is not none %}{{ row.light_digital }}
+                            {% else %}—{% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="no-data">기록이 없습니다.</div>
+        {% endif %}
+    </section>
+
+</div>
+
+<script>
+const CURRENT_FARM = "{{ current_farm }}";
+
+// ── Chart setup ──────────────────────────────────────────
+Chart.defaults.color = '#64748b';
+Chart.defaults.borderColor = '#1e293b';
+
+function makeChart(canvasId, color) {
+    const ctx = document.getElementById(canvasId).getContext('2d');
+    return new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: [],
+            datasets: [{
+                data: [],
+                borderColor: color,
+                backgroundColor: color + '18',
+                borderWidth: 2,
+                pointRadius: 3,
+                pointHoverRadius: 6,
+                pointBackgroundColor: color,
+                tension: 0.35,
+                fill: true,
+                spanGaps: false,
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: true,
+            aspectRatio: 2.2,
+            animation: { duration: 300 },
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    backgroundColor: '#0f172a',
+                    titleColor: '#94a3b8',
+                    bodyColor: '#f1f5f9',
+                    borderColor: '#334155',
+                    borderWidth: 1,
+                    padding: 10,
+                }
+            },
+            scales: {
+                x: {
+                    grid: { color: '#1e293b' },
+                    ticks: { color: '#475569', maxRotation: 45, font: { size: 10 } },
+                },
+                y: {
+                    grid: { color: '#1e293b' },
+                    ticks: { color: '#475569', font: { size: 10 } },
+                }
+            }
+        }
+    });
+}
+
+const charts = {
+    temp:  makeChart('tempChart',  '#f97316'),
+    hum:   makeChart('humChart',   '#38bdf8'),
+    soil:  makeChart('soilChart',  '#4ade80'),
+    light: makeChart('lightChart', '#facc15'),
+};
+
+const CHART_KEYS = [
+    ['temp',  'temperature'],
+    ['hum',   'humidity'],
+    ['soil',  'soil_moisture'],
+    ['light', 'light'],
+];
+
+// ── Chart data load ──────────────────────────────────────
+async function loadCharts(period) {
+    try {
+        const res = await fetch(`/api/dashboard/chart?farm=${CURRENT_FARM}&period=${period}`);
+        const data = await res.json();
+        for (const [name, key] of CHART_KEYS) {
+            charts[name].data.labels = data.labels;
+            charts[name].data.datasets[0].data = data[key];
+            charts[name].update('active');
+        }
+    } catch (e) {
+        console.error('Chart load failed:', e);
+    }
+}
+
+function setChartPeriod(period, btn) {
+    document.querySelectorAll('#chart-btn-hourly, #chart-btn-daily, #chart-btn-weekly, #chart-btn-monthly')
+        .forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    loadCharts(period);
+}
+
+// ── Averages load ────────────────────────────────────────
+const AVG_PERIOD_LABELS = { daily: '지난 24시간', weekly: '지난 7일', monthly: '지난 30일' };
+
+async function loadAverages(period) {
+    try {
+        const res = await fetch(`/api/dashboard/stats?farm=${CURRENT_FARM}&period=${period}`);
+        const d = await res.json();
+
+        document.getElementById('avg-temp').textContent  = d.temperature  ?? '—';
+        document.getElementById('avg-hum').textContent   = d.humidity     ?? '—';
+        document.getElementById('avg-soil').textContent  = d.soil_moisture ?? '—';
+        document.getElementById('avg-light').textContent = d.light        ?? '—';
+
+        const sub = document.getElementById('avg-temp-sub');
+        if (sub) sub.textContent = `${AVG_PERIOD_LABELS[period] ?? period} · ${d.count}건`;
+    } catch (e) {
+        console.error('Averages load failed:', e);
+    }
+}
+
+function setAvgPeriod(period, btn) {
+    document.querySelectorAll('#avg-btn-daily, #avg-btn-weekly, #avg-btn-monthly')
+        .forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    loadAverages(period);
+}
+
+// ── Init ─────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+    loadAverages('daily');
+    loadCharts('hourly');
+});
+</script>
+
 </body>
 </html>

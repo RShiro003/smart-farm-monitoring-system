@@ -2,10 +2,13 @@ from flask import Flask, jsonify, request, render_template
 import json
 import os
 from datetime import datetime
+from routes.dashboard import dashboard_bp
 
 app = Flask(__name__)
+app.register_blueprint(dashboard_bp)
 
-DATA_FILE = os.path.join("data", "sensor_data.json")
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_FILE = os.path.join(_BASE_DIR, "data", "sensor_data.json")
 
 
 def load_sensor_data():
