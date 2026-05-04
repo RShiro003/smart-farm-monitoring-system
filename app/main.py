@@ -1,6 +1,8 @@
 from flask import Flask, jsonify, request, redirect
 import json
 import os
+import tempfile
+import threading
 from datetime import datetime
 from routes.dashboard import dashboard_bp
 
@@ -9,6 +11,7 @@ app.register_blueprint(dashboard_bp)
 
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_FILE = os.path.join(_BASE_DIR, "data", "sensor_data.json")
+_lock = threading.Lock()
 
 
 def load_sensor_data():
@@ -21,12 +24,29 @@ def load_sensor_data():
         return []
 
 
-def save_sensor_data(data):
-    # 실행 위치가 어디든 app/data 폴더에 저장되도록 수정
-    os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
+def _atomic_write(data):
+    """임시 파일에 쓴 뒤 rename — 부분 쓰기로 인한 파일 손상 방지."""
+    data_dir = os.path.dirname(DATA_FILE)
+    os.makedirs(data_dir, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=data_dir, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+        os.replace(tmp_path, DATA_FILE)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
+
+def append_sensor_data(new_record):
+    """Lock 안에서 읽기 → 추가 → 쓰기를 원자적으로 수행."""
+    with _lock:
+        data = load_sensor_data()
+        data.append(new_record)
+        _atomic_write(data)
 
 
 @app.route("/")
@@ -67,9 +87,7 @@ def receive_sensor_data():
     # 라즈베리파이 서버가 받은 시간은 따로 저장
     new_data["server_received_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    data = load_sensor_data()
-    data.append(new_data)
-    save_sensor_data(data)
+    append_sensor_data(new_data)
 
     print(
         f"[{new_data['server_received_at']}] "

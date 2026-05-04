@@ -121,11 +121,9 @@ def dashboard():
         farm_id = FARMS[0]["id"]
     data = _load_data(farm_id)
     latest = data[-1] if data else None
-    history = list(reversed(data))
     return render_template(
         "index.html",
         latest=latest,
-        history=history,
         farms=FARMS,
         current_farm=farm_id,
     )
@@ -158,6 +156,60 @@ def dashboard_latest():
         farm_id = FARMS[0]["id"]
     data = _load_data(farm_id)
     return jsonify(data[-1] if data else None)
+
+
+@dashboard_bp.route("/api/dashboard/history")
+def dashboard_history():
+    farm_id = request.args.get("farm", FARMS[0]["id"])
+    if farm_id not in _FARM_IDS:
+        farm_id = FARMS[0]["id"]
+
+    try:
+        page     = max(1, int(request.args.get("page", 1)))
+        per_page = max(1, int(request.args.get("per_page", 10)))
+    except ValueError:
+        page, per_page = 1, 10
+
+    date_str  = request.args.get("date", "").strip()       # YYYY-MM-DD
+    time_from = request.args.get("time_from", "").strip()  # HH:MM
+    time_to   = request.args.get("time_to",   "").strip()  # HH:MM
+
+    data = list(reversed(_load_data(farm_id)))  # newest first
+
+    filtered = []
+    has_filter = bool(date_str or time_from or time_to)
+    for row in data:
+        t = _parse_time(row)
+        if t is None:
+            if not has_filter:
+                filtered.append(row)
+            continue
+
+        if date_str and t.strftime("%Y-%m-%d") != date_str:
+            continue
+        if time_from:
+            try:
+                tf = datetime.strptime(time_from, "%H:%M").time()
+                if t.time() < tf:
+                    continue
+            except ValueError:
+                pass
+        if time_to:
+            try:
+                tt = datetime.strptime(time_to, "%H:%M").time()
+                if t.time() > tt:
+                    continue
+            except ValueError:
+                pass
+        filtered.append(row)
+
+    total  = len(filtered)
+    pages  = max(1, (total + per_page - 1) // per_page)
+    page   = min(page, pages)
+    start  = (page - 1) * per_page
+    items  = filtered[start:start + per_page]
+
+    return jsonify({"items": items, "page": page, "pages": pages, "total": total})
 
 
 @dashboard_bp.route("/api/dashboard/mtime")
