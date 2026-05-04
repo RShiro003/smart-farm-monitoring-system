@@ -149,3 +149,24 @@ def dashboard_chart():
         farm_id = FARMS[0]["id"]
     data = _load_data(farm_id)
     return jsonify(_aggregate_chart(data, period))
+
+
+@dashboard_bp.route("/api/dashboard/latest")
+def dashboard_latest():
+    farm_id = request.args.get("farm", FARMS[0]["id"])
+    if farm_id not in _FARM_IDS:
+        farm_id = FARMS[0]["id"]
+    data = _load_data(farm_id)
+    return jsonify(data[-1] if data else None)
+
+
+@dashboard_bp.route("/api/dashboard/mtime")
+def dashboard_mtime():
+    farm_id = request.args.get("farm", FARMS[0]["id"])
+    if farm_id not in _FARM_IDS:
+        farm_id = FARMS[0]["id"]
+    try:
+        mtime = os.path.getmtime(_data_file(farm_id))
+    except OSError:
+        mtime = 0
+    return jsonify({"mtime": mtime})

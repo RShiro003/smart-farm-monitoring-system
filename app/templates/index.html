@@ -248,47 +248,32 @@
     <section>
         <div class="section-header">
             <div class="section-title">현재 센서 값</div>
-            {% if latest %}
-            <div style="font-size:0.72rem;color:#475569;">
-                마지막 수신:
-                {% if latest.server_received_at %}{{ latest.server_received_at }}
-                {% elif latest.time %}{{ latest.time }}
-                {% else %}—{% endif %}
+            <div style="font-size:0.72rem;color:#475569;" id="live-time-wrap">
+                마지막 수신: <span id="live-time">{% if latest %}{% if latest.server_received_at %}{{ latest.server_received_at }}{% elif latest.time %}{{ latest.time }}{% else %}—{% endif %}{% else %}—{% endif %}</span>
             </div>
-            {% endif %}
         </div>
 
         {% if latest %}
         <div class="cards">
             <div class="card temp">
                 <div class="label">온도</div>
-                <div class="value">
-                    {{ latest.temperature if latest.temperature is not none else '—' }}<span class="unit">°C</span>
-                </div>
+                <div class="value"><span id="live-temp">{{ latest.temperature if latest.temperature is not none else '—' }}</span><span class="unit">°C</span></div>
             </div>
             <div class="card hum">
                 <div class="label">습도</div>
-                <div class="value">
-                    {{ latest.humidity if latest.humidity is not none else '—' }}<span class="unit">%</span>
-                </div>
+                <div class="value"><span id="live-hum">{{ latest.humidity if latest.humidity is not none else '—' }}</span><span class="unit">%</span></div>
             </div>
             <div class="card soil">
                 <div class="label">토양 수분</div>
-                <div class="value">
-                    {{ latest.soil_moisture if latest.soil_moisture is not none else '—' }}<span class="unit">%</span>
-                </div>
+                <div class="value"><span id="live-soil">{{ latest.soil_moisture if latest.soil_moisture is not none else '—' }}</span><span class="unit">%</span></div>
             </div>
             <div class="card light">
                 <div class="label">조도</div>
-                <div class="value">
-                    {% if latest.light is not none %}{{ latest.light }}
-                    {% elif latest.light_digital is not none %}{{ latest.light_digital }}
-                    {% else %}—{% endif %}<span class="unit">lux</span>
-                </div>
+                <div class="value"><span id="live-light">{% if latest.light is not none %}{{ latest.light }}{% elif latest.light_digital is not none %}{{ latest.light_digital }}{% else %}—{% endif %}</span><span class="unit">lux</span></div>
             </div>
         </div>
         {% else %}
-        <div class="no-data">센서 데이터가 없습니다.</div>
+        <div class="no-data" id="live-no-data">센서 데이터가 없습니다.</div>
         {% endif %}
     </section>
 
@@ -404,6 +389,10 @@
 <script>
 const CURRENT_FARM = "{{ current_farm }}";
 
+// ── State ────────────────────────────────────────────────
+let currentAvgPeriod   = 'daily';
+let currentChartPeriod = 'hourly';
+
 // ── Chart setup ──────────────────────────────────────────
 Chart.defaults.color = '#64748b';
 Chart.defaults.borderColor = '#1e293b';
@@ -471,6 +460,25 @@ const CHART_KEYS = [
     ['light', 'light'],
 ];
 
+// ── Latest sensor values ─────────────────────────────────
+async function refreshLatest() {
+    try {
+        const res = await fetch(`/api/dashboard/latest?farm=${CURRENT_FARM}`);
+        const d = await res.json();
+        if (!d) return;
+
+        const val = (key, alt) => d[key] ?? (alt ? d[alt] : null) ?? '—';
+        document.getElementById('live-temp').textContent  = val('temperature');
+        document.getElementById('live-hum').textContent   = val('humidity');
+        document.getElementById('live-soil').textContent  = val('soil_moisture');
+        document.getElementById('live-light').textContent = val('light', 'light_digital');
+        document.getElementById('live-time').textContent  =
+            d.server_received_at ?? d.time ?? '—';
+    } catch (e) {
+        console.error('Latest refresh failed:', e);
+    }
+}
+
 // ── Chart data load ──────────────────────────────────────
 async function loadCharts(period) {
     try {
@@ -487,6 +495,7 @@ async function loadCharts(period) {
 }
 
 function setChartPeriod(period, btn) {
+    currentChartPeriod = period;
     document.querySelectorAll('#chart-btn-hourly, #chart-btn-daily, #chart-btn-weekly, #chart-btn-monthly')
         .forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
@@ -501,10 +510,10 @@ async function loadAverages(period) {
         const res = await fetch(`/api/dashboard/stats?farm=${CURRENT_FARM}&period=${period}`);
         const d = await res.json();
 
-        document.getElementById('avg-temp').textContent  = d.temperature  ?? '—';
-        document.getElementById('avg-hum').textContent   = d.humidity     ?? '—';
+        document.getElementById('avg-temp').textContent  = d.temperature   ?? '—';
+        document.getElementById('avg-hum').textContent   = d.humidity      ?? '—';
         document.getElementById('avg-soil').textContent  = d.soil_moisture ?? '—';
-        document.getElementById('avg-light').textContent = d.light        ?? '—';
+        document.getElementById('avg-light').textContent = d.light         ?? '—';
 
         const sub = document.getElementById('avg-temp-sub');
         if (sub) sub.textContent = `${AVG_PERIOD_LABELS[period] ?? period} · ${d.count}건`;
@@ -514,16 +523,44 @@ async function loadAverages(period) {
 }
 
 function setAvgPeriod(period, btn) {
+    currentAvgPeriod = period;
     document.querySelectorAll('#avg-btn-daily, #avg-btn-weekly, #avg-btn-monthly')
         .forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     loadAverages(period);
 }
 
+// ── Full refresh (called on SSE update) ──────────────────
+async function refreshAll() {
+    await Promise.all([
+        refreshLatest(),
+        loadAverages(currentAvgPeriod),
+        loadCharts(currentChartPeriod),
+    ]);
+}
+
+// ── Polling for data changes ─────────────────────────────
+let _lastMtime = null;
+
+async function pollMtime() {
+    try {
+        const res = await fetch(`/api/dashboard/mtime?farm=${CURRENT_FARM}`);
+        const { mtime } = await res.json();
+        if (_lastMtime !== null && mtime !== _lastMtime) {
+            await refreshAll();
+        }
+        _lastMtime = mtime;
+    } catch (e) {
+        console.error('Mtime poll failed:', e);
+    }
+}
+
 // ── Init ─────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
     loadAverages('daily');
     loadCharts('hourly');
+    pollMtime();
+    setInterval(pollMtime, 3000);
 });
 </script>
 
