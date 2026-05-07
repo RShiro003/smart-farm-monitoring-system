@@ -8,6 +8,8 @@ const char* ssid = "TP-Link_31CA";
 const char* password = "54299979";
 
 const char* serverUrl = "http://192.168.1.106:5000/api/sensor";
+// Set a unique DEVICE_ID for each ESP32 board before flashing.
+const char* DEVICE_ID = "esp32_sensor";
 
 // 한국 시간 UTC+9
 const long gmtOffset_sec = 9 * 3600;
@@ -149,13 +151,16 @@ void loop() {
     http.addHeader("Content-Type", "application/json");
 
     String jsonData = "{";
-    jsonData += "\"device_id\":\"esp32_sensor\",";
+    jsonData += "\"device_id\":\"";
+    jsonData += DEVICE_ID;
+    jsonData += "\",";
     jsonData += "\"timestamp\":\"" + timestamp + "\",";
     jsonData += "\"temperature\":" + String(temperature, 2) + ",";
     jsonData += "\"humidity\":" + String(humidity, 2) + ",";
     jsonData += "\"soil_moisture\":" + String(soilMoisture) + ",";
     jsonData += "\"soil_raw\":" + String(soilRaw) + ",";
     jsonData += "\"soil_digital\":" + String(soilDigital) + ",";
+    jsonData += "\"light\":" + String(lightDigital) + ",";
     jsonData += "\"light_digital\":" + String(lightDigital);
     jsonData += "}";
 

@@ -38,31 +38,36 @@
             gap: 8px;
         }
 
-        .farm-tabs {
+        .device-picker {
             display: flex;
-            gap: 6px;
+            align-items: center;
+            gap: 8px;
         }
 
-        .farm-tab {
-            padding: 6px 16px;
+        .device-picker label {
+            color: #94a3b8;
+            font-size: 0.78rem;
+            font-weight: 700;
+        }
+
+        .device-picker select {
+            min-width: 180px;
+            padding: 6px 34px 6px 12px;
             border: 1px solid #334155;
             border-radius: 8px;
-            background: transparent;
-            color: #94a3b8;
+            background: #0f172a;
+            color: #e2e8f0;
             cursor: pointer;
             font-size: 0.82rem;
             font-weight: 500;
-            text-decoration: none;
             transition: all 0.15s;
         }
 
-        .farm-tab:hover { border-color: #4ade80; color: #4ade80; }
+        .device-picker select:hover { border-color: #4ade80; }
 
-        .farm-tab.active {
-            background: #4ade80;
+        .device-picker select:focus {
+            outline: none;
             border-color: #4ade80;
-            color: #0f172a;
-            font-weight: 700;
         }
 
         /* ── Layout ── */
@@ -157,8 +162,8 @@
 
         @media (max-width: 720px) {
             .chart-grid { grid-template-columns: 1fr; }
-            .farm-tabs { gap: 4px; }
-            .farm-tab { padding: 5px 10px; font-size: 0.75rem; }
+            header { padding: 0 16px; }
+            .device-picker select { min-width: 132px; font-size: 0.75rem; }
         }
 
         .chart-card {
@@ -304,14 +309,17 @@
 
 <header>
     <div class="header-title">🌱 Smart Farm</div>
-    <div class="farm-tabs">
-        {% for farm in farms %}
-        <a href="/dashboard?farm={{ farm.id }}"
-           class="farm-tab {% if farm.id == current_farm %}active{% endif %}">
-            {{ farm.name }}
-        </a>
-        {% endfor %}
-    </div>
+    <form class="device-picker" method="get" action="/dashboard">
+        <label for="device-select">장치</label>
+        <select id="device-select" name="device_id" onchange="this.form.submit()">
+            <option value="all" {% if not current_device_id %}selected{% endif %}>전체</option>
+            {% for device in devices %}
+            <option value="{{ device }}" {% if device == current_device_id %}selected{% endif %}>
+                {{ device }}
+            </option>
+            {% endfor %}
+        </select>
+    </form>
 </header>
 
 <div class="container">
@@ -321,32 +329,28 @@
         <div class="section-header">
             <div class="section-title">현재 센서 값</div>
             <div style="font-size:0.72rem;color:#475569;" id="live-time-wrap">
-                마지막 수신: <span id="live-time">{% if latest %}{% if latest.server_received_at %}{{ latest.server_received_at }}{% elif latest.time %}{{ latest.time }}{% else %}—{% endif %}{% else %}—{% endif %}</span>
+                마지막 수신: <span id="live-time">{% if latest %}{% if latest.server_received_at %}{{ latest.server_received_at }}{% elif latest.time %}{{ latest.time }}{% elif latest.timestamp %}{{ latest.timestamp }}{% else %}—{% endif %}{% else %}—{% endif %}</span>
             </div>
         </div>
 
-        {% if latest %}
         <div class="cards">
             <div class="card temp">
                 <div class="label">온도</div>
-                <div class="value"><span id="live-temp">{{ latest.temperature if latest.temperature is not none else '—' }}</span><span class="unit">°C</span></div>
+                <div class="value"><span id="live-temp">{% if latest and latest.temperature is not none %}{{ latest.temperature }}{% else %}—{% endif %}</span><span class="unit">°C</span></div>
             </div>
             <div class="card hum">
                 <div class="label">습도</div>
-                <div class="value"><span id="live-hum">{{ latest.humidity if latest.humidity is not none else '—' }}</span><span class="unit">%</span></div>
+                <div class="value"><span id="live-hum">{% if latest and latest.humidity is not none %}{{ latest.humidity }}{% else %}—{% endif %}</span><span class="unit">%</span></div>
             </div>
             <div class="card soil">
                 <div class="label">토양 수분</div>
-                <div class="value"><span id="live-soil">{{ latest.soil_moisture if latest.soil_moisture is not none else '—' }}</span><span class="unit">%</span></div>
+                <div class="value"><span id="live-soil">{% if latest and latest.soil_moisture is not none %}{{ latest.soil_moisture }}{% else %}—{% endif %}</span><span class="unit">%</span></div>
             </div>
             <div class="card light">
                 <div class="label">조도</div>
-                <div class="value"><span id="live-light">{% if latest.light is not none %}{{ latest.light }}{% elif latest.light_digital is not none %}{{ latest.light_digital }}{% else %}—{% endif %}</span><span class="unit">lux</span></div>
+                <div class="value"><span id="live-light">{% if latest and latest.light is not none %}{{ latest.light }}{% elif latest and latest.light_digital is not none %}{{ latest.light_digital }}{% else %}—{% endif %}</span><span class="unit">lux</span></div>
             </div>
         </div>
-        {% else %}
-        <div class="no-data" id="live-no-data">센서 데이터가 없습니다.</div>
-        {% endif %}
     </section>
 
     <!-- ── 기간별 평균 ── -->
@@ -448,7 +452,14 @@
 </div>
 
 <script>
-const CURRENT_FARM = "{{ current_farm }}";
+const SELECTED_DEVICE_ID = {{ (current_device_id or '')|tojson }};
+
+function apiUrl(path, values = {}) {
+    const params = new URLSearchParams(values);
+    if (SELECTED_DEVICE_ID) params.set('device_id', SELECTED_DEVICE_ID);
+    const query = params.toString();
+    return query ? `${path}?${query}` : path;
+}
 
 // ── State ────────────────────────────────────────────────
 let currentAvgPeriod   = 'daily';
@@ -524,17 +535,17 @@ const CHART_KEYS = [
 // ── Latest sensor values ─────────────────────────────────
 async function refreshLatest() {
     try {
-        const res = await fetch(`/api/dashboard/latest?farm=${CURRENT_FARM}`);
-        const d = await res.json();
-        if (!d) return;
+        const res = await fetch(apiUrl('/api/sensor'));
+        const rows = await res.json();
+        const d = rows.length ? rows[rows.length - 1] : null;
 
         const val = (key, alt) => d[key] ?? (alt ? d[alt] : null) ?? '—';
-        document.getElementById('live-temp').textContent  = val('temperature');
-        document.getElementById('live-hum').textContent   = val('humidity');
-        document.getElementById('live-soil').textContent  = val('soil_moisture');
-        document.getElementById('live-light').textContent = val('light', 'light_digital');
+        document.getElementById('live-temp').textContent  = d ? val('temperature') : '—';
+        document.getElementById('live-hum').textContent   = d ? val('humidity') : '—';
+        document.getElementById('live-soil').textContent  = d ? val('soil_moisture') : '—';
+        document.getElementById('live-light').textContent = d ? val('light', 'light_digital') : '—';
         document.getElementById('live-time').textContent  =
-            d.server_received_at ?? d.time ?? '—';
+            d ? (d.server_received_at ?? d.time ?? d.timestamp ?? '—') : '—';
     } catch (e) {
         console.error('Latest refresh failed:', e);
     }
@@ -543,7 +554,7 @@ async function refreshLatest() {
 // ── Chart data load ──────────────────────────────────────
 async function loadCharts(period) {
     try {
-        const res = await fetch(`/api/dashboard/chart?farm=${CURRENT_FARM}&period=${period}`);
+        const res = await fetch(apiUrl('/api/dashboard/chart', { period }));
         const data = await res.json();
         for (const [name, key] of CHART_KEYS) {
             charts[name].data.labels = data.labels;
@@ -568,7 +579,7 @@ const AVG_PERIOD_LABELS = { daily: '지난 24시간', weekly: '지난 7일', mon
 
 async function loadAverages(period) {
     try {
-        const res = await fetch(`/api/dashboard/stats?farm=${CURRENT_FARM}&period=${period}`);
+        const res = await fetch(apiUrl('/api/dashboard/stats', { period }));
         const d = await res.json();
 
         document.getElementById('avg-temp').textContent  = d.temperature   ?? '—';
@@ -597,7 +608,8 @@ let historyFilters = { date: '', time_from: '', time_to: '' };
 
 async function loadHistory(page = 1) {
     historyPage = page;
-    const params = new URLSearchParams({ farm: CURRENT_FARM, page, per_page: 10 });
+    const params = new URLSearchParams({ page, per_page: 10 });
+    if (SELECTED_DEVICE_ID) params.set('device_id', SELECTED_DEVICE_ID);
     if (historyFilters.date)      params.append('date',      historyFilters.date);
     if (historyFilters.time_from) params.append('time_from', historyFilters.time_from);
     if (historyFilters.time_to)   params.append('time_to',   historyFilters.time_to);
@@ -623,13 +635,13 @@ function renderHistoryTable(items, page, perPage) {
     }
 
     const val  = (row, key, alt) => row[key] ?? (alt ? row[alt] : null) ?? '—';
-    const time = (row) => row.server_received_at ?? row.time ?? '—';
+    const time = (row) => row.server_received_at ?? row.time ?? row.timestamp ?? '—';
 
     tbody.innerHTML = items.map((row, i) => `
         <tr>
             <td style="color:#475569">${offset + i + 1}</td>
             <td>${time(row)}</td>
-            <td>${row.device_id ?? '—'}</td>
+            <td>${row.device_id ?? 'legacy'}</td>
             <td class="temp-val">${val(row, 'temperature')}</td>
             <td class="hum-val">${val(row, 'humidity')}</td>
             <td class="soil-val">${val(row, 'soil_moisture')}</td>
@@ -695,7 +707,7 @@ let _lastMtime = null;
 
 async function pollMtime() {
     try {
-        const res = await fetch(`/api/dashboard/mtime?farm=${CURRENT_FARM}`);
+        const res = await fetch(apiUrl('/api/dashboard/mtime'));
         const { mtime } = await res.json();
         if (_lastMtime !== null && mtime !== _lastMtime) {
             await refreshAll();

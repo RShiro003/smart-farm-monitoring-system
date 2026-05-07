@@ -1,45 +1,47 @@
 from flask import Blueprint, render_template, request, jsonify
-import json
-import os
 from datetime import datetime, timedelta
 from collections import defaultdict
+try:
+    from services.sensor_service import (
+        filter_sensor_data,
+        latest_sensor_record,
+        list_device_ids,
+        load_sensor_data,
+        normalize_device_filter,
+        parse_record_time,
+        sensor_data_mtime,
+    )
+except ModuleNotFoundError:
+    from app.services.sensor_service import (
+        filter_sensor_data,
+        latest_sensor_record,
+        list_device_ids,
+        load_sensor_data,
+        normalize_device_filter,
+        parse_record_time,
+        sensor_data_mtime,
+    )
 
 dashboard_bp = Blueprint("dashboard", __name__)
 
-_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-FARMS = [
-    {"id": "farm_1", "name": "농장 1"},
-    {"id": "farm_2", "name": "농장 2"},
-    {"id": "farm_3", "name": "농장 3"},
-]
-_FARM_IDS = {f["id"] for f in FARMS}
+def _selected_device_id():
+    return normalize_device_filter(request.args.get("device_id"))
 
 
-def _data_file(farm_id):
-    if farm_id == "farm_1":
-        return os.path.normpath(os.path.join(_BASE_DIR, "..", "data", "sensor_data.json"))
-    return os.path.normpath(os.path.join(_BASE_DIR, "..", "data", f"{farm_id}_sensor_data.json"))
+def _load_data(device_id=None):
+    return filter_sensor_data(load_sensor_data(), device_id)
 
 
-def _load_data(farm_id):
-    try:
-        with open(_data_file(farm_id), "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return []
+def _device_options(all_data, selected_device_id):
+    devices = list_device_ids(all_data)
+    if selected_device_id and selected_device_id not in devices:
+        devices.append(selected_device_id)
+    return sorted(devices)
 
 
 def _parse_time(row):
-    ts = row.get("server_received_at") or row.get("time") or row.get("timestamp")
-    if not ts or ts == "time_not_set":
-        return None
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
-        try:
-            return datetime.strptime(ts, fmt)
-        except ValueError:
-            continue
-    return None
+    return parse_record_time(row)
 
 
 def _avg(rows, key, alt_key=None):
@@ -116,54 +118,40 @@ def _aggregate_chart(data, period):
 
 @dashboard_bp.route("/dashboard")
 def dashboard():
-    farm_id = request.args.get("farm", FARMS[0]["id"])
-    if farm_id not in _FARM_IDS:
-        farm_id = FARMS[0]["id"]
-    data = _load_data(farm_id)
-    latest = data[-1] if data else None
+    selected_device_id = _selected_device_id()
+    all_data = load_sensor_data()
+    data = filter_sensor_data(all_data, selected_device_id)
+    latest = latest_sensor_record(data)
     return render_template(
         "index.html",
         latest=latest,
-        farms=FARMS,
-        current_farm=farm_id,
+        devices=_device_options(all_data, selected_device_id),
+        current_device_id=selected_device_id,
     )
 
 
 @dashboard_bp.route("/api/dashboard/stats")
 def dashboard_stats():
-    farm_id = request.args.get("farm", FARMS[0]["id"])
     period = request.args.get("period", "daily")
-    if farm_id not in _FARM_IDS:
-        farm_id = FARMS[0]["id"]
-    data = _load_data(farm_id)
+    data = _load_data(_selected_device_id())
     return jsonify(_calculate_averages(data, period))
 
 
 @dashboard_bp.route("/api/dashboard/chart")
 def dashboard_chart():
-    farm_id = request.args.get("farm", FARMS[0]["id"])
     period = request.args.get("period", "hourly")
-    if farm_id not in _FARM_IDS:
-        farm_id = FARMS[0]["id"]
-    data = _load_data(farm_id)
+    data = _load_data(_selected_device_id())
     return jsonify(_aggregate_chart(data, period))
 
 
 @dashboard_bp.route("/api/dashboard/latest")
 def dashboard_latest():
-    farm_id = request.args.get("farm", FARMS[0]["id"])
-    if farm_id not in _FARM_IDS:
-        farm_id = FARMS[0]["id"]
-    data = _load_data(farm_id)
-    return jsonify(data[-1] if data else None)
+    data = _load_data(_selected_device_id())
+    return jsonify(latest_sensor_record(data))
 
 
 @dashboard_bp.route("/api/dashboard/history")
 def dashboard_history():
-    farm_id = request.args.get("farm", FARMS[0]["id"])
-    if farm_id not in _FARM_IDS:
-        farm_id = FARMS[0]["id"]
-
     try:
         page     = max(1, int(request.args.get("page", 1)))
         per_page = max(1, int(request.args.get("per_page", 10)))
@@ -174,7 +162,7 @@ def dashboard_history():
     time_from = request.args.get("time_from", "").strip()  # HH:MM
     time_to   = request.args.get("time_to",   "").strip()  # HH:MM
 
-    data = list(reversed(_load_data(farm_id)))  # newest first
+    data = list(reversed(_load_data(_selected_device_id())))  # newest first
 
     filtered = []
     has_filter = bool(date_str or time_from or time_to)
@@ -209,16 +197,15 @@ def dashboard_history():
     start  = (page - 1) * per_page
     items  = filtered[start:start + per_page]
 
-    return jsonify({"items": items, "page": page, "pages": pages, "total": total})
+    return jsonify({
+        "items": items,
+        "page": page,
+        "per_page": per_page,
+        "pages": pages,
+        "total": total,
+    })
 
 
 @dashboard_bp.route("/api/dashboard/mtime")
 def dashboard_mtime():
-    farm_id = request.args.get("farm", FARMS[0]["id"])
-    if farm_id not in _FARM_IDS:
-        farm_id = FARMS[0]["id"]
-    try:
-        mtime = os.path.getmtime(_data_file(farm_id))
-    except OSError:
-        mtime = 0
-    return jsonify({"mtime": mtime})
+    return jsonify({"mtime": sensor_data_mtime()})

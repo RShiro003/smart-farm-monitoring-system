@@ -1,52 +1,95 @@
 from flask import Flask, jsonify, request, redirect
-import json
-import os
-import tempfile
-import threading
 from datetime import datetime
-from routes.dashboard import dashboard_bp
+try:
+    from routes.dashboard import dashboard_bp
+    from services.sensor_service import (
+        append_sensor_data,
+        filter_sensor_data,
+        latest_sensor_record,
+        load_sensor_data,
+        normalize_device_filter,
+    )
+except ModuleNotFoundError:
+    from app.routes.dashboard import dashboard_bp
+    from app.services.sensor_service import (
+        append_sensor_data,
+        filter_sensor_data,
+        latest_sensor_record,
+        load_sensor_data,
+        normalize_device_filter,
+    )
 
 app = Flask(__name__)
 app.register_blueprint(dashboard_bp)
 
-_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_FILE = os.path.join(_BASE_DIR, "data", "sensor_data.json")
-_lock = threading.Lock()
+SENSOR_RANGES = {
+    "temperature": (-40, 85),
+    "humidity": (0, 100),
+    "soil_moisture": (0, 100),
+    "light": (0, 200000),
+}
+
+OPTIONAL_SENSOR_RANGES = {
+    "light_digital": (0, 1),
+    "soil_digital": (0, 1),
+    "soil_raw": (0, 4095),
+}
 
 
-def load_sensor_data():
+def _coerce_number(value):
+    if isinstance(value, bool):
+        raise ValueError
+    return float(value)
+
+
+def _store_number(payload, key, value):
+    if key in {"temperature", "humidity"}:
+        payload[key] = value
+    elif value.is_integer():
+        payload[key] = int(value)
+    else:
+        payload[key] = value
+
+
+def _validate_number(payload, key, minimum, maximum, required=True):
+    if key not in payload:
+        return "required" if required else None
+
     try:
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return []
-    except json.JSONDecodeError:
-        return []
+        value = _coerce_number(payload[key])
+    except (TypeError, ValueError):
+        return "must be a number"
+
+    if value < minimum or value > maximum:
+        return f"must be between {minimum} and {maximum}"
+
+    _store_number(payload, key, value)
+    return None
 
 
-def _atomic_write(data):
-    """임시 파일에 쓴 뒤 rename — 부분 쓰기로 인한 파일 손상 방지."""
-    data_dir = os.path.dirname(DATA_FILE)
-    os.makedirs(data_dir, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(dir=data_dir, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=4)
-        os.replace(tmp_path, DATA_FILE)
-    except Exception:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
+def validate_sensor_payload(payload):
+    errors = {}
 
+    device_id = payload.get("device_id")
+    if not isinstance(device_id, str) or not device_id.strip():
+        errors["device_id"] = "required"
+    else:
+        payload["device_id"] = device_id.strip()
 
-def append_sensor_data(new_record):
-    """Lock 안에서 읽기 → 추가 → 쓰기를 원자적으로 수행."""
-    with _lock:
-        data = load_sensor_data()
-        data.append(new_record)
-        _atomic_write(data)
+    if "light" not in payload and "light_digital" in payload:
+        payload["light"] = payload["light_digital"]
+
+    for key, (minimum, maximum) in SENSOR_RANGES.items():
+        error = _validate_number(payload, key, minimum, maximum, required=True)
+        if error:
+            errors[key] = error
+
+    for key, (minimum, maximum) in OPTIONAL_SENSOR_RANGES.items():
+        error = _validate_number(payload, key, minimum, maximum, required=False)
+        if error:
+            errors[key] = error
+
+    return errors
 
 
 @app.route("/")
@@ -59,7 +102,7 @@ def home():
 def status():
     # 기존 / 에서 보여주던 서버 상태 확인용 JSON
     data = load_sensor_data()
-    latest = data[-1] if data else None
+    latest = latest_sensor_record(data)
 
     return jsonify({
         "message": "Smart Farm Server Running",
@@ -69,16 +112,23 @@ def status():
 
 @app.route("/api/sensor", methods=["GET"])
 def get_sensor_data():
-    data = load_sensor_data()
+    device_id = normalize_device_filter(request.args.get("device_id"))
+    data = filter_sensor_data(load_sensor_data(), device_id)
+    # sensor_data.json is append-only, so GET keeps chronological order: oldest to newest.
     return jsonify(data)
 
 
 @app.route("/api/sensor", methods=["POST"])
 def receive_sensor_data():
-    new_data = request.get_json()
+    new_data = request.get_json(silent=True)
 
-    if not new_data:
+    if not isinstance(new_data, dict):
         return jsonify({"error": "No JSON received"}), 400
+
+    new_data = dict(new_data)
+    errors = validate_sensor_payload(new_data)
+    if errors:
+        return jsonify({"error": "Invalid sensor data", "details": errors}), 400
 
     # ESP32가 보낸 측정 시간이 없을 때만 기본값 처리
     if "timestamp" not in new_data:
