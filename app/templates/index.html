@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Smart Farm Dashboard</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1/dist/chartjs-plugin-annotation.min.js"></script>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -71,13 +72,132 @@
         }
 
         /* ── Layout ── */
-        .container {
-            max-width: 1200px;
+        .app-layout {
+            display: flex;
+            align-items: flex-start;
+            gap: 24px;
+            max-width: 1560px;
             margin: 0 auto;
             padding: 28px 20px 48px;
+        }
+
+        .container {
+            flex: 1;
+            min-width: 0;
             display: flex;
             flex-direction: column;
             gap: 32px;
+        }
+
+        /* ── Basil panel ── */
+        .basil-panel {
+            width: 264px;
+            flex-shrink: 0;
+            position: sticky;
+            top: 76px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .basil-header {
+            background: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 12px;
+            padding: 14px 18px;
+            font-size: 0.9rem;
+            font-weight: 700;
+            color: #f1f5f9;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .guide-card {
+            background: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 12px;
+            padding: 14px 18px;
+        }
+
+        .guide-lbl {
+            font-size: 0.68rem;
+            font-weight: 700;
+            color: #64748b;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            margin-bottom: 4px;
+        }
+
+        .guide-range {
+            font-size: 1rem;
+            font-weight: 700;
+            color: #f1f5f9;
+            margin-bottom: 2px;
+        }
+
+        .guide-current {
+            font-size: 0.76rem;
+            color: #64748b;
+            margin-bottom: 8px;
+        }
+
+        .guide-current b { color: #94a3b8; font-weight: 600; }
+
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 3px 9px;
+            border-radius: 999px;
+            font-size: 0.7rem;
+            font-weight: 700;
+            margin-bottom: 10px;
+        }
+
+        .status-ok      { background: rgba(74,222,128,.15); color: #4ade80; border: 1px solid rgba(74,222,128,.3); }
+        .status-warn    { background: rgba(251,191,36,.15);  color: #fbbf24; border: 1px solid rgba(251,191,36,.3); }
+        .status-danger  { background: rgba(248,113,113,.15); color: #f87171; border: 1px solid rgba(248,113,113,.3); }
+        .status-unknown { background: rgba(71,85,105,.2);    color: #64748b; border: 1px solid #334155; }
+
+        .guide-bar-wrap { position: relative; height: 6px; background: #0f172a; border-radius: 3px; }
+
+        .guide-bar-zone {
+            position: absolute;
+            top: 0; height: 100%;
+            background: rgba(74,222,128,.35);
+            border-radius: 3px;
+        }
+
+        .guide-bar-dot {
+            position: absolute;
+            top: 50%;
+            width: 10px; height: 10px;
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            display: none;
+            border: 2px solid #0f172a;
+        }
+
+        .guide-notes {
+            background: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 12px;
+            padding: 14px 18px;
+            display: flex;
+            flex-direction: column;
+            gap: 7px;
+        }
+
+        .guide-note { font-size: 0.73rem; color: #64748b; line-height: 1.45; }
+        .guide-note b { color: #94a3b8; }
+
+        @media (max-width: 1100px) {
+            .app-layout { flex-direction: column; }
+            .basil-panel { width: 100%; position: static; flex-direction: row; flex-wrap: wrap; }
+            .basil-header { width: 100%; }
+            .guide-card { flex: 1; min-width: 180px; }
+            .guide-notes { width: 100%; }
         }
 
         section { display: flex; flex-direction: column; gap: 14px; }
@@ -322,6 +442,7 @@
     </form>
 </header>
 
+<div class="app-layout">
 <div class="container">
 
     <!-- ── 현재 센서 값 ── -->
@@ -449,7 +570,72 @@
         <div class="pagination" id="pagination"></div>
     </section>
 
-</div>
+</div><!-- /container -->
+
+<!-- ── 바질 재배 가이드 패널 ── -->
+<aside class="basil-panel">
+
+    <div class="basil-header">🌿 바질 재배 환경 가이드</div>
+
+    <!-- 온도 -->
+    <div class="guide-card">
+        <div class="guide-lbl">온도</div>
+        <div class="guide-range">18 – 27 °C</div>
+        <div class="guide-current">현재: <b id="gval-temperature">—</b> °C</div>
+        <div id="gstatus-temperature" class="status-badge status-unknown">—</div>
+        <div class="guide-bar-wrap">
+            <div class="guide-bar-zone"  id="gzone-temperature"></div>
+            <div class="guide-bar-dot"   id="gdot-temperature"></div>
+        </div>
+    </div>
+
+    <!-- 습도 -->
+    <div class="guide-card">
+        <div class="guide-lbl">습도</div>
+        <div class="guide-range">40 – 70 %</div>
+        <div class="guide-current">현재: <b id="gval-humidity">—</b> %</div>
+        <div id="gstatus-humidity" class="status-badge status-unknown">—</div>
+        <div class="guide-bar-wrap">
+            <div class="guide-bar-zone" id="gzone-humidity"></div>
+            <div class="guide-bar-dot"  id="gdot-humidity"></div>
+        </div>
+    </div>
+
+    <!-- 토양 수분 -->
+    <div class="guide-card">
+        <div class="guide-lbl">토양 수분</div>
+        <div class="guide-range">50 – 70 %</div>
+        <div class="guide-current">현재: <b id="gval-soil_moisture">—</b> %</div>
+        <div id="gstatus-soil_moisture" class="status-badge status-unknown">—</div>
+        <div class="guide-bar-wrap">
+            <div class="guide-bar-zone" id="gzone-soil_moisture"></div>
+            <div class="guide-bar-dot"  id="gdot-soil_moisture"></div>
+        </div>
+    </div>
+
+    <!-- 조도 -->
+    <div class="guide-card">
+        <div class="guide-lbl">조도</div>
+        <div class="guide-range">2,000 – 8,000 lux</div>
+        <div class="guide-current">현재: <b id="gval-light">—</b> lux</div>
+        <div id="gstatus-light" class="status-badge status-unknown">—</div>
+        <div class="guide-bar-wrap">
+            <div class="guide-bar-zone" id="gzone-light"></div>
+            <div class="guide-bar-dot"  id="gdot-light"></div>
+        </div>
+    </div>
+
+    <!-- 재배 팁 -->
+    <div class="guide-notes">
+        <div class="guide-note">🌡️ <b>최적 온도:</b> 21–27°C. 10°C 이하 생장 정지, 35°C 이상 열 스트레스.</div>
+        <div class="guide-note">💧 <b>물 주기:</b> 겉흙이 마르면 충분히 관수. 약 2–3일 간격 권장.</div>
+        <div class="guide-note">☀️ <b>일조:</b> 하루 6–8시간 직사광선. 실내 2,000 lux 이상 확보.</div>
+        <div class="guide-note">🍄 <b>주의:</b> 습도 80% 초과 시 잿빛곰팡이 발생 위험.</div>
+        <div class="guide-note">🌱 <b>토양:</b> 과습 금지. 배수 잘되는 배양토 사용 권장.</div>
+    </div>
+
+</aside>
+</div><!-- /app-layout -->
 
 <script>
 const SELECTED_DEVICE_ID = {{ (current_device_id or '')|tojson }};
@@ -465,11 +651,84 @@ function apiUrl(path, values = {}) {
 let currentAvgPeriod   = 'daily';
 let currentChartPeriod = 'hourly';
 
+// ── Basil reference data ─────────────────────────────────
+const BASIL = {
+    temperature:   { min: 18,   max: 27,   scaleMax: 40,    unit: '°C'  },
+    humidity:      { min: 40,   max: 70,   scaleMax: 100,   unit: '%'   },
+    soil_moisture: { min: 50,   max: 70,   scaleMax: 100,   unit: '%'   },
+    light:         { min: 2000, max: 8000, scaleMax: 12000, unit: 'lux' },
+};
+
+function basilStatus(key, raw) {
+    if (raw == null || raw === '—') return { text: '—', cls: 'status-unknown' };
+    const v = parseFloat(raw);
+    if (isNaN(v)) return { text: '—', cls: 'status-unknown' };
+    const { min, max } = BASIL[key];
+    if (v >= min && v <= max) return { text: '✓ 적정', cls: 'status-ok' };
+    const slack = (max - min) * 0.2;
+    if (v >= min - slack && v <= max + slack) return { text: '⚠ 주의', cls: 'status-warn' };
+    return { text: '✗ 위험', cls: 'status-danger' };
+}
+
+function updateBasilPanel(d) {
+    const rawOf = {
+        temperature:   d?.temperature,
+        humidity:      d?.humidity,
+        soil_moisture: d?.soil_moisture,
+        light:         d?.light ?? d?.light_digital,
+    };
+    for (const key of Object.keys(BASIL)) {
+        const raw = rawOf[key] ?? '—';
+        const s = basilStatus(key, raw);
+
+        const valEl = document.getElementById(`gval-${key}`);
+        if (valEl) valEl.textContent = raw;
+
+        const sEl = document.getElementById(`gstatus-${key}`);
+        if (sEl) { sEl.textContent = s.text; sEl.className = `status-badge ${s.cls}`; }
+
+        const { min, max, scaleMax } = BASIL[key];
+        const zone = document.getElementById(`gzone-${key}`);
+        if (zone) {
+            zone.style.left  = `${(min / scaleMax * 100).toFixed(1)}%`;
+            zone.style.width = `${((max - min) / scaleMax * 100).toFixed(1)}%`;
+        }
+        const dot = document.getElementById(`gdot-${key}`);
+        if (dot && raw !== '—') {
+            const v = parseFloat(raw);
+            dot.style.left    = `${Math.max(0, Math.min(100, v / scaleMax * 100)).toFixed(1)}%`;
+            dot.style.display = 'block';
+            dot.style.background = s.cls === 'status-ok' ? '#4ade80'
+                                 : s.cls === 'status-warn' ? '#fbbf24' : '#f87171';
+        }
+    }
+}
+
 // ── Chart setup ──────────────────────────────────────────
 Chart.defaults.color = '#64748b';
 Chart.defaults.borderColor = '#1e293b';
 
-function makeChart(canvasId, color) {
+function makeHLine(y, color, labelText) {
+    return {
+        type: 'line',
+        yMin: y, yMax: y,
+        borderColor: color,
+        borderWidth: 1.5,
+        borderDash: [6, 4],
+        label: {
+            display: true,
+            content: labelText,
+            position: 'start',
+            backgroundColor: color + '22',
+            color: color,
+            font: { size: 10, weight: '600' },
+            padding: { x: 6, y: 3 },
+            borderRadius: 4,
+        }
+    };
+}
+
+function makeChart(canvasId, color, annotations = {}) {
     const ctx = document.getElementById(canvasId).getContext('2d');
     return new Chart(ctx, {
         type: 'line',
@@ -502,7 +761,8 @@ function makeChart(canvasId, color) {
                     borderColor: '#334155',
                     borderWidth: 1,
                     padding: 10,
-                }
+                },
+                annotation: { annotations }
             },
             scales: {
                 x: {
@@ -519,10 +779,22 @@ function makeChart(canvasId, color) {
 }
 
 const charts = {
-    temp:  makeChart('tempChart',  '#f97316'),
-    hum:   makeChart('humChart',   '#38bdf8'),
-    soil:  makeChart('soilChart',  '#4ade80'),
-    light: makeChart('lightChart', '#facc15'),
+    temp: makeChart('tempChart', '#f97316', {
+        minRef: makeHLine(18,   '#4ade80', '최소 18°C'),
+        maxRef: makeHLine(27,   '#f97316', '최대 27°C'),
+    }),
+    hum: makeChart('humChart', '#38bdf8', {
+        minRef: makeHLine(40,   '#4ade80', '최소 40%'),
+        maxRef: makeHLine(70,   '#f97316', '최대 70%'),
+    }),
+    soil: makeChart('soilChart', '#4ade80', {
+        minRef: makeHLine(50,   '#4ade80', '최소 50%'),
+        maxRef: makeHLine(70,   '#f97316', '최대 70%'),
+    }),
+    light: makeChart('lightChart', '#facc15', {
+        minRef: makeHLine(2000, '#4ade80', '최소 2000lux'),
+        maxRef: makeHLine(8000, '#f97316', '최대 8000lux'),
+    }),
 };
 
 const CHART_KEYS = [
@@ -546,6 +818,7 @@ async function refreshLatest() {
         document.getElementById('live-light').textContent = d ? val('light', 'light_digital') : '—';
         document.getElementById('live-time').textContent  =
             d ? (d.server_received_at ?? d.time ?? d.timestamp ?? '—') : '—';
+        updateBasilPanel(d);
     } catch (e) {
         console.error('Latest refresh failed:', e);
     }
@@ -720,6 +993,9 @@ async function pollMtime() {
 
 // ── Init ─────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
+    // 바질 바 초기 렌더 (현재값 없이 구간만 표시)
+    updateBasilPanel(null);
+
     loadAverages('daily');
     loadCharts('hourly');
     loadHistory(1);
