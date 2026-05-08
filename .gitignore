@@ -1,4 +1,6 @@
 venv/
 __pycache__/
 app/data/*.json
+app/data/*.db
+app/data/*.db-*
 !app/data/.gitkeep

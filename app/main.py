@@ -9,6 +9,11 @@ try:
         load_sensor_data,
         normalize_device_filter,
     )
+    from services.threshold_service import (
+        THRESHOLD_FIELDS,
+        get_or_create_thresholds,
+        upsert_thresholds,
+    )
 except ModuleNotFoundError:
     from app.routes.dashboard import dashboard_bp
     from app.services.sensor_service import (
@@ -17,6 +22,11 @@ except ModuleNotFoundError:
         latest_sensor_record,
         load_sensor_data,
         normalize_device_filter,
+    )
+    from app.services.threshold_service import (
+        THRESHOLD_FIELDS,
+        get_or_create_thresholds,
+        upsert_thresholds,
     )
 
 app = Flask(__name__)
@@ -34,6 +44,13 @@ OPTIONAL_SENSOR_RANGES = {
     "soil_digital": (0, 1),
     "soil_raw": (0, 4095),
 }
+
+THRESHOLD_PAIRS = [
+    ("temperature_min", "temperature_max"),
+    ("humidity_min", "humidity_max"),
+    ("soil_moisture_min", "soil_moisture_max"),
+    ("light_min", "light_max"),
+]
 
 
 def _coerce_number(value):
@@ -90,6 +107,47 @@ def validate_sensor_payload(payload):
             errors[key] = error
 
     return errors
+
+
+def _normalize_required_device_id(value):
+    if not isinstance(value, str):
+        return None
+
+    value = value.strip()
+    return value or None
+
+
+def _store_threshold_number(values, key, value):
+    values[key] = int(value) if value.is_integer() else value
+
+
+def validate_threshold_payload(payload):
+    errors = {}
+    values = {}
+
+    device_id = _normalize_required_device_id(payload.get("device_id"))
+    if device_id is None:
+        errors["device_id"] = "required"
+
+    for key in THRESHOLD_FIELDS:
+        if key not in payload:
+            errors[key] = "required"
+            continue
+
+        try:
+            value = _coerce_number(payload[key])
+        except (TypeError, ValueError):
+            errors[key] = "must be a number"
+            continue
+
+        _store_threshold_number(values, key, value)
+
+    for min_key, max_key in THRESHOLD_PAIRS:
+        if min_key in values and max_key in values and values[min_key] > values[max_key]:
+            errors[min_key] = "must be less than or equal to max"
+            errors[max_key] = "must be greater than or equal to min"
+
+    return device_id, values, errors
 
 
 @app.route("/")
@@ -153,6 +211,28 @@ def receive_sensor_data():
         "message": "Data received",
         "data": new_data
     }), 201
+
+
+@app.route("/api/thresholds", methods=["GET"])
+def get_thresholds():
+    device_id = _normalize_required_device_id(request.args.get("device_id"))
+    if device_id is None:
+        return jsonify({"error": "device_id is required"}), 400
+
+    return jsonify(get_or_create_thresholds(device_id))
+
+
+@app.route("/api/thresholds", methods=["POST", "PUT"])
+def save_thresholds():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "No JSON received"}), 400
+
+    device_id, values, errors = validate_threshold_payload(payload)
+    if errors:
+        return jsonify({"error": "Invalid threshold settings", "details": errors}), 400
+
+    return jsonify(upsert_thresholds(device_id, values))
 
 
 if __name__ == "__main__":

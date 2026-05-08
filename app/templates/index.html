@@ -388,6 +388,70 @@
         .btn-ghost { background: #1e293b; color: #94a3b8; border: 1px solid #334155; }
         .btn-ghost:hover { color: #e2e8f0; border-color: #475569; }
 
+        /* ── Threshold controls in guide panel ── */
+        .threshold-device {
+            font-size: 0.76rem;
+            color: #94a3b8;
+            font-weight: 600;
+            margin-bottom: 10px;
+        }
+
+        .threshold-range {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+            margin-top: 10px;
+        }
+
+        .threshold-field {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+
+        .threshold-field label {
+            color: #64748b;
+            font-size: 0.7rem;
+            font-weight: 700;
+        }
+
+        .threshold-field input {
+            width: 100%;
+            background: #0f172a;
+            border: 1px solid #334155;
+            border-radius: 6px;
+            color: #e2e8f0;
+            padding: 7px 9px;
+            font-size: 0.82rem;
+        }
+
+        .threshold-field input:focus {
+            outline: none;
+            border-color: #4ade80;
+        }
+
+        .threshold-field input:disabled {
+            color: #64748b;
+            cursor: not-allowed;
+            opacity: 0.7;
+        }
+
+        .threshold-actions {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .threshold-message {
+            min-height: 1rem;
+            font-size: 0.76rem;
+            color: #64748b;
+        }
+
+        .threshold-message.ok { color: #4ade80; }
+        .threshold-message.error { color: #f87171; }
+
         /* ── Pagination ── */
         .pagination {
             display: flex;
@@ -580,49 +644,100 @@
     <!-- 온도 -->
     <div class="guide-card">
         <div class="guide-lbl">온도</div>
-        <div class="guide-range">18 – 27 °C</div>
+        <div class="guide-range" id="grange-temperature">18 – 27 °C</div>
         <div class="guide-current">현재: <b id="gval-temperature">—</b> °C</div>
         <div id="gstatus-temperature" class="status-badge status-unknown">—</div>
         <div class="guide-bar-wrap">
             <div class="guide-bar-zone"  id="gzone-temperature"></div>
             <div class="guide-bar-dot"   id="gdot-temperature"></div>
         </div>
+        <div class="threshold-range">
+            <div class="threshold-field">
+                <label for="threshold_temperature_min">최소</label>
+                <input id="threshold_temperature_min" form="threshold-form" type="number" step="0.1" inputmode="decimal">
+            </div>
+            <div class="threshold-field">
+                <label for="threshold_temperature_max">최대</label>
+                <input id="threshold_temperature_max" form="threshold-form" type="number" step="0.1" inputmode="decimal">
+            </div>
+        </div>
     </div>
 
     <!-- 습도 -->
     <div class="guide-card">
         <div class="guide-lbl">습도</div>
-        <div class="guide-range">40 – 70 %</div>
+        <div class="guide-range" id="grange-humidity">40 – 70 %</div>
         <div class="guide-current">현재: <b id="gval-humidity">—</b> %</div>
         <div id="gstatus-humidity" class="status-badge status-unknown">—</div>
         <div class="guide-bar-wrap">
             <div class="guide-bar-zone" id="gzone-humidity"></div>
             <div class="guide-bar-dot"  id="gdot-humidity"></div>
         </div>
+        <div class="threshold-range">
+            <div class="threshold-field">
+                <label for="threshold_humidity_min">최소</label>
+                <input id="threshold_humidity_min" form="threshold-form" type="number" step="0.1" inputmode="decimal">
+            </div>
+            <div class="threshold-field">
+                <label for="threshold_humidity_max">최대</label>
+                <input id="threshold_humidity_max" form="threshold-form" type="number" step="0.1" inputmode="decimal">
+            </div>
+        </div>
     </div>
 
     <!-- 토양 수분 -->
     <div class="guide-card">
         <div class="guide-lbl">토양 수분</div>
-        <div class="guide-range">50 – 70 %</div>
+        <div class="guide-range" id="grange-soil_moisture">50 – 70 %</div>
         <div class="guide-current">현재: <b id="gval-soil_moisture">—</b> %</div>
         <div id="gstatus-soil_moisture" class="status-badge status-unknown">—</div>
         <div class="guide-bar-wrap">
             <div class="guide-bar-zone" id="gzone-soil_moisture"></div>
             <div class="guide-bar-dot"  id="gdot-soil_moisture"></div>
         </div>
+        <div class="threshold-range">
+            <div class="threshold-field">
+                <label for="threshold_soil_moisture_min">최소</label>
+                <input id="threshold_soil_moisture_min" form="threshold-form" type="number" step="0.1" inputmode="decimal">
+            </div>
+            <div class="threshold-field">
+                <label for="threshold_soil_moisture_max">최대</label>
+                <input id="threshold_soil_moisture_max" form="threshold-form" type="number" step="0.1" inputmode="decimal">
+            </div>
+        </div>
     </div>
 
     <!-- 조도 -->
     <div class="guide-card">
         <div class="guide-lbl">조도</div>
-        <div class="guide-range">2,000 – 8,000 lux</div>
+        <div class="guide-range" id="grange-light">2,000 – 8,000 lux</div>
         <div class="guide-current">현재: <b id="gval-light">—</b> lux</div>
         <div id="gstatus-light" class="status-badge status-unknown">—</div>
         <div class="guide-bar-wrap">
             <div class="guide-bar-zone" id="gzone-light"></div>
             <div class="guide-bar-dot"  id="gdot-light"></div>
         </div>
+        <div class="threshold-range">
+            <div class="threshold-field">
+                <label for="threshold_light_min">최소</label>
+                <input id="threshold_light_min" form="threshold-form" type="number" step="0.1" inputmode="decimal">
+            </div>
+            <div class="threshold-field">
+                <label for="threshold_light_max">최대</label>
+                <input id="threshold_light_max" form="threshold-form" type="number" step="0.1" inputmode="decimal">
+            </div>
+        </div>
+    </div>
+
+    <div class="guide-card">
+        <div class="guide-lbl">임계값 설정</div>
+        <div class="threshold-device">장치: <span id="threshold-device-label">{% if current_device_id %}{{ current_device_id }}{% else %}장치 선택 필요{% endif %}</span></div>
+        <form id="threshold-form" onsubmit="event.preventDefault(); saveThresholds(SELECTED_DEVICE_ID);">
+            <div class="threshold-actions">
+                <button class="btn btn-primary" id="threshold-save-btn" type="submit">저장</button>
+            </div>
+            <div class="threshold-message" id="threshold-message"></div>
+        </form>
     </div>
 
     <!-- 재배 팁 -->
@@ -647,6 +762,152 @@ function apiUrl(path, values = {}) {
     return query ? `${path}?${query}` : path;
 }
 
+const THRESHOLD_FIELDS = [
+    'temperature_min',
+    'temperature_max',
+    'humidity_min',
+    'humidity_max',
+    'soil_moisture_min',
+    'soil_moisture_max',
+    'light_min',
+    'light_max',
+];
+
+const THRESHOLD_PAIRS = [
+    ['temperature_min', 'temperature_max', '온도'],
+    ['humidity_min', 'humidity_max', '습도'],
+    ['soil_moisture_min', 'soil_moisture_max', '토양수분'],
+    ['light_min', 'light_max', '조도'],
+];
+
+function thresholdInput(field) {
+    return document.getElementById(`threshold_${field}`);
+}
+
+function setThresholdMessage(text, kind = '') {
+    const el = document.getElementById('threshold-message');
+    if (!el) return;
+    el.textContent = text;
+    el.className = `threshold-message${kind ? ` ${kind}` : ''}`;
+}
+
+function setThresholdFormDisabled(disabled) {
+    for (const field of THRESHOLD_FIELDS) {
+        const input = thresholdInput(field);
+        if (input) input.disabled = disabled;
+    }
+    const saveBtn = document.getElementById('threshold-save-btn');
+    if (saveBtn) saveBtn.disabled = disabled;
+}
+
+function fillThresholdInputs(data) {
+    for (const field of THRESHOLD_FIELDS) {
+        const input = thresholdInput(field);
+        if (input) input.value = data[field] ?? '';
+    }
+    applyThresholdsToGuide(data);
+}
+
+async function loadThresholds(deviceId) {
+    const selectedDeviceId = (deviceId || '').trim();
+    if (!selectedDeviceId) {
+        setThresholdFormDisabled(true);
+        setThresholdMessage('임계값을 설정하려면 장치를 선택하세요.');
+        return;
+    }
+
+    setThresholdFormDisabled(false);
+    setThresholdMessage('임계값을 불러오는 중...');
+
+    try {
+        const res = await fetch(`/api/thresholds?device_id=${encodeURIComponent(selectedDeviceId)}`);
+        const data = await res.json();
+
+        if (!res.ok) {
+            throw new Error(data.error || '임계값을 불러오지 못했습니다.');
+        }
+
+        fillThresholdInputs(data);
+        setThresholdMessage('현재 저장된 임계값을 불러왔습니다.', 'ok');
+    } catch (e) {
+        console.error('Threshold load failed:', e);
+        setThresholdMessage(e.message || '임계값을 불러오지 못했습니다.', 'error');
+    }
+}
+
+function validateThresholdInputs() {
+    const values = {};
+    const errors = [];
+
+    for (const field of THRESHOLD_FIELDS) {
+        const input = thresholdInput(field);
+        const raw = input ? input.value.trim() : '';
+        const value = Number(raw);
+
+        if (raw === '' || Number.isNaN(value)) {
+            errors.push(`${field} 값은 숫자로 입력하세요.`);
+            continue;
+        }
+
+        values[field] = value;
+    }
+
+    for (const [minField, maxField, label] of THRESHOLD_PAIRS) {
+        if (values[minField] != null && values[maxField] != null && values[minField] > values[maxField]) {
+            errors.push(`${label} 최소값은 최대값보다 클 수 없습니다.`);
+        }
+    }
+
+    return { ok: errors.length === 0, values, errors };
+}
+
+function serverThresholdError(data) {
+    if (!data?.details) return data?.error || '임계값 저장에 실패했습니다.';
+    return Object.entries(data.details)
+        .map(([field, message]) => `${field}: ${message}`)
+        .join(', ');
+}
+
+async function saveThresholds(deviceId) {
+    const selectedDeviceId = (deviceId || '').trim();
+    if (!selectedDeviceId) {
+        setThresholdMessage('장치를 먼저 선택하세요.', 'error');
+        return;
+    }
+
+    const result = validateThresholdInputs();
+    if (!result.ok) {
+        setThresholdMessage(result.errors[0], 'error');
+        return;
+    }
+
+    const payload = { device_id: selectedDeviceId, ...result.values };
+    const saveBtn = document.getElementById('threshold-save-btn');
+    if (saveBtn) saveBtn.disabled = true;
+    setThresholdMessage('저장 중...');
+
+    try {
+        const res = await fetch('/api/thresholds', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+
+        if (!res.ok) {
+            throw new Error(serverThresholdError(data));
+        }
+
+        fillThresholdInputs(data);
+        setThresholdMessage('임계값이 저장되었습니다.', 'ok');
+    } catch (e) {
+        console.error('Threshold save failed:', e);
+        setThresholdMessage(e.message || '임계값 저장에 실패했습니다.', 'error');
+    } finally {
+        if (saveBtn) saveBtn.disabled = false;
+    }
+}
+
 // ── State ────────────────────────────────────────────────
 let currentAvgPeriod   = 'daily';
 let currentChartPeriod = 'hourly';
@@ -658,6 +919,47 @@ const BASIL = {
     soil_moisture: { min: 50,   max: 70,   scaleMax: 100,   unit: '%'   },
     light:         { min: 2000, max: 8000, scaleMax: 12000, unit: 'lux' },
 };
+
+const THRESHOLD_GUIDE_KEYS = {
+    temperature: ['temperature_min', 'temperature_max'],
+    humidity: ['humidity_min', 'humidity_max'],
+    soil_moisture: ['soil_moisture_min', 'soil_moisture_max'],
+    light: ['light_min', 'light_max'],
+};
+
+function formatGuideNumber(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return value;
+    return Number.isInteger(n) ? n.toLocaleString() : n.toLocaleString(undefined, { maximumFractionDigits: 1 });
+}
+
+function updateGuideRangeVisual(key) {
+    const { min, max, scaleMax, unit } = BASIL[key];
+    const range = document.getElementById(`grange-${key}`);
+    if (range) range.textContent = `${formatGuideNumber(min)} – ${formatGuideNumber(max)} ${unit}`;
+
+    const zone = document.getElementById(`gzone-${key}`);
+    if (zone) {
+        zone.style.left = `${(min / scaleMax * 100).toFixed(1)}%`;
+        zone.style.width = `${((max - min) / scaleMax * 100).toFixed(1)}%`;
+    }
+}
+
+function applyThresholdsToGuide(data) {
+    if (!data) return;
+
+    for (const [key, [minField, maxField]] of Object.entries(THRESHOLD_GUIDE_KEYS)) {
+        const min = Number(data[minField]);
+        const max = Number(data[maxField]);
+        if (!Number.isFinite(min) || !Number.isFinite(max)) continue;
+
+        BASIL[key].min = min;
+        BASIL[key].max = max;
+        const scaleFloor = key === 'temperature' ? 40 : 100;
+        BASIL[key].scaleMax = Math.max(scaleFloor, max, 1);
+        updateGuideRangeVisual(key);
+    }
+}
 
 function basilStatus(key, raw) {
     if (raw == null || raw === '—') return { text: '—', cls: 'status-unknown' };
@@ -999,6 +1301,7 @@ document.addEventListener('DOMContentLoaded', () => {
     loadAverages('daily');
     loadCharts('hourly');
     loadHistory(1);
+    loadThresholds(SELECTED_DEVICE_ID);
     pollMtime();
     setInterval(pollMtime, 3000);
 });
