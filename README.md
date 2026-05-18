@@ -1,10 +1,20 @@
 # Smart Farm Monitoring System
 
-## Multiple ESP32 Sensor Nodes
+## Sensor Data Storage
 
-The Flask server stores sensor rows in `app/data/sensor_data.json`. Every new
-POST to `/api/sensor` must include a non-empty `device_id`; older rows without
-`device_id` are treated as `legacy` when they are read.
+Sensor API routes live in `app/routes/sensor.py` and are registered from
+`app/main.py` as a Flask Blueprint.
+
+The Flask server stores sensor rows in SQLite at `app/data/sensor_data.db`.
+Every new POST to `/api/sensor` must include a non-empty `device_id`; older rows
+without `device_id` are treated as `legacy` when they are read.
+
+`app/data/sensor_data.json` is a legacy import source for old JSON-based data.
+It is not the runtime storage target for new sensor readings. New readings are
+inserted into the `sensor_data` SQLite table, and only the columns defined in
+`app/services/sensor_service.py` are persisted.
+
+## Multiple ESP32 Sensor Nodes
 
 To add another ESP32 board, change only the `DEVICE_ID` constant near the top of
 that board's `src/main.cpp` before flashing:

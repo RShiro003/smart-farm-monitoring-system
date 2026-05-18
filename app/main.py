@@ -1,13 +1,16 @@
 from flask import Flask, jsonify, request, redirect
-from datetime import datetime
+
+# 이 파일은 Flask 애플리케이션의 진입점이다.
+# 센서 수집 API는 app/routes/sensor.py의 Blueprint가 담당하고,
+# 대시보드 화면/조회 API는 app/routes/dashboard.py의 Blueprint가 담당한다.
+# main.py에는 앱 생성, Blueprint 등록, 공통 상태 확인, 임계값 저장 API만 남겨
+# "어떤 라우트가 어디에 있는지"를 명확히 분리한다.
 try:
     from routes.dashboard import dashboard_bp
+    from routes.sensor import sensor_bp
     from services.sensor_service import (
-        append_sensor_data,
-        filter_sensor_data,
         latest_sensor_record,
         load_sensor_data,
-        normalize_device_filter,
     )
     from services.threshold_service import (
         THRESHOLD_FIELDS,
@@ -16,12 +19,10 @@ try:
     )
 except ModuleNotFoundError:
     from app.routes.dashboard import dashboard_bp
+    from app.routes.sensor import sensor_bp
     from app.services.sensor_service import (
-        append_sensor_data,
-        filter_sensor_data,
         latest_sensor_record,
         load_sensor_data,
-        normalize_device_filter,
     )
     from app.services.threshold_service import (
         THRESHOLD_FIELDS,
@@ -30,21 +31,14 @@ except ModuleNotFoundError:
     )
 
 app = Flask(__name__)
+# /dashboard, /api/dashboard/* 라우트 등록
 app.register_blueprint(dashboard_bp)
+# /api/sensor GET/POST 라우트 등록
+app.register_blueprint(sensor_bp)
 
-SENSOR_RANGES = {
-    "temperature": (-40, 85),
-    "humidity": (0, 100),
-    "soil_moisture": (0, 100),
-    "light": (0, 200000),
-}
-
-OPTIONAL_SENSOR_RANGES = {
-    "light_digital": (0, 1),
-    "soil_digital": (0, 1),
-    "soil_raw": (0, 4095),
-}
-
+# 임계값은 최소/최대가 한 쌍으로 들어온다.
+# 저장 전 검증 단계에서 최소값이 최대값보다 큰 잘못된 설정을 막기 위해
+# 각 센서 항목의 min/max 필드명을 한 곳에 모아 둔다.
 THRESHOLD_PAIRS = [
     ("temperature_min", "temperature_max"),
     ("humidity_min", "humidity_max"),
@@ -54,62 +48,17 @@ THRESHOLD_PAIRS = [
 
 
 def _coerce_number(value):
+    # JSON에서는 true/false도 숫자처럼 처리될 수 있으므로 임계값에는 허용하지 않는다.
+    # ESP32와 대시보드는 임계값을 실제 센서 범위 비교에 사용하므로 명시적인 숫자만 받는다.
     if isinstance(value, bool):
         raise ValueError
     return float(value)
 
 
-def _store_number(payload, key, value):
-    if key in {"temperature", "humidity"}:
-        payload[key] = value
-    elif value.is_integer():
-        payload[key] = int(value)
-    else:
-        payload[key] = value
-
-
-def _validate_number(payload, key, minimum, maximum, required=True):
-    if key not in payload:
-        return "required" if required else None
-
-    try:
-        value = _coerce_number(payload[key])
-    except (TypeError, ValueError):
-        return "must be a number"
-
-    if value < minimum or value > maximum:
-        return f"must be between {minimum} and {maximum}"
-
-    _store_number(payload, key, value)
-    return None
-
-
-def validate_sensor_payload(payload):
-    errors = {}
-
-    device_id = payload.get("device_id")
-    if not isinstance(device_id, str) or not device_id.strip():
-        errors["device_id"] = "required"
-    else:
-        payload["device_id"] = device_id.strip()
-
-    if "light" not in payload and "light_digital" in payload:
-        payload["light"] = payload["light_digital"]
-
-    for key, (minimum, maximum) in SENSOR_RANGES.items():
-        error = _validate_number(payload, key, minimum, maximum, required=True)
-        if error:
-            errors[key] = error
-
-    for key, (minimum, maximum) in OPTIONAL_SENSOR_RANGES.items():
-        error = _validate_number(payload, key, minimum, maximum, required=False)
-        if error:
-            errors[key] = error
-
-    return errors
-
-
 def _normalize_required_device_id(value):
+    # 임계값은 장치별로 따로 저장된다.
+    # 빈 문자열을 허용하면 어떤 ESP32에 적용해야 하는 설정인지 알 수 없기 때문에
+    # 공백 제거 후 값이 없으면 None으로 돌려 라우트에서 400 응답을 만든다.
     if not isinstance(value, str):
         return None
 
@@ -118,10 +67,15 @@ def _normalize_required_device_id(value):
 
 
 def _store_threshold_number(values, key, value):
+    # 화면에 다시 내려줄 때 18.0처럼 불필요한 소수점이 붙지 않도록
+    # 정수로 표현 가능한 값은 int로 보관한다. 비교/저장 의미는 그대로 숫자다.
     values[key] = int(value) if value.is_integer() else value
 
 
 def validate_threshold_payload(payload):
+    # /api/thresholds PUT/POST에서 들어온 JSON을 DB에 저장하기 전에 검증한다.
+    # 서버에서도 한 번 더 검증해야 브라우저 우회 요청이나 잘못된 ESP32 설정값으로
+    # 임계값 테이블이 깨지는 것을 막을 수 있다.
     errors = {}
     values = {}
 
@@ -152,13 +106,15 @@ def validate_threshold_payload(payload):
 
 @app.route("/")
 def home():
-    # http://라즈베리파이IP:5000 으로 접속하면 대시보드로 이동
+    # Raspberry Pi 주소만 입력해도 모니터링 화면으로 들어가게 한다.
+    # 실제 화면 렌더링은 dashboard Blueprint의 /dashboard 라우트가 담당한다.
     return redirect("/dashboard")
 
 
 @app.route("/api/status", methods=["GET"])
 def status():
-    # 기존 / 에서 보여주던 서버 상태 확인용 JSON
+    # 서버가 살아 있는지 간단히 확인하는 상태 API다.
+    # 최신 센서 row도 함께 내려주기 때문에 ESP32 수신 여부를 빠르게 점검할 수 있다.
     data = load_sensor_data()
     latest = latest_sensor_record(data)
 
@@ -168,53 +124,10 @@ def status():
     })
 
 
-@app.route("/api/sensor", methods=["GET"])
-def get_sensor_data():
-    device_id = normalize_device_filter(request.args.get("device_id"))
-    data = filter_sensor_data(load_sensor_data(), device_id)
-    # sensor_data.json is append-only, so GET keeps chronological order: oldest to newest.
-    return jsonify(data)
-
-
-@app.route("/api/sensor", methods=["POST"])
-def receive_sensor_data():
-    new_data = request.get_json(silent=True)
-
-    if not isinstance(new_data, dict):
-        return jsonify({"error": "No JSON received"}), 400
-
-    new_data = dict(new_data)
-    errors = validate_sensor_payload(new_data)
-    if errors:
-        return jsonify({"error": "Invalid sensor data", "details": errors}), 400
-
-    # ESP32가 보낸 측정 시간이 없을 때만 기본값 처리
-    if "timestamp" not in new_data:
-        new_data["timestamp"] = "time_not_set"
-
-    # 라즈베리파이 서버가 받은 시간은 따로 저장
-    new_data["server_received_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    append_sensor_data(new_data)
-
-    print(
-        f"[{new_data['server_received_at']}] "
-        f"device={new_data.get('device_id')} "
-        f"esp_time={new_data.get('timestamp')} "
-        f"temp={new_data.get('temperature')} "
-        f"hum={new_data.get('humidity')} "
-        f"soil={new_data.get('soil_moisture')} "
-        f"light={new_data.get('light_digital') or new_data.get('light')}"
-    )
-
-    return jsonify({
-        "message": "Data received",
-        "data": new_data
-    }), 201
-
-
 @app.route("/api/thresholds", methods=["GET"])
 def get_thresholds():
+    # 대시보드와 실제 ESP32 노드는 device_id를 기준으로 임계값을 조회한다.
+    # 장치마다 설치 위치나 센서 보정값이 다를 수 있으므로 전역 설정 하나를 공유하지 않는다.
     device_id = _normalize_required_device_id(request.args.get("device_id"))
     if device_id is None:
         return jsonify({"error": "device_id is required"}), 400
@@ -224,6 +137,8 @@ def get_thresholds():
 
 @app.route("/api/thresholds", methods=["POST", "PUT"])
 def save_thresholds():
+    # 대시보드의 임계값 입력 폼이 호출하는 저장 API다.
+    # 성공하면 DB에 반영된 최종 설정을 다시 반환하여 화면의 기준선/가이드도 같은 값으로 갱신한다.
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
         return jsonify({"error": "No JSON received"}), 400
