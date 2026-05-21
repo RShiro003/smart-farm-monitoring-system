@@ -17,6 +17,15 @@ try:
         get_or_create_thresholds,
         upsert_thresholds,
     )
+    from services.crop_service import (
+        CROP_VALUE_FIELDS,
+        list_crops,
+        create_crop,
+        update_crop,
+        delete_crop,
+        get_device_crop,
+        set_device_crop,
+    )
 except ModuleNotFoundError:
     from app.routes.dashboard import dashboard_bp
     from app.routes.sensor import sensor_bp
@@ -28,6 +37,15 @@ except ModuleNotFoundError:
         THRESHOLD_FIELDS,
         get_or_create_thresholds,
         upsert_thresholds,
+    )
+    from app.services.crop_service import (
+        CROP_VALUE_FIELDS,
+        list_crops,
+        create_crop,
+        update_crop,
+        delete_crop,
+        get_device_crop,
+        set_device_crop,
     )
 
 app = Flask(__name__)
@@ -148,6 +166,115 @@ def save_thresholds():
         return jsonify({"error": "Invalid threshold settings", "details": errors}), 400
 
     return jsonify(upsert_thresholds(device_id, values))
+
+
+# ── Crop profile API ──────────────────────────────────────────────────────────
+
+_CROP_PAIRS = [
+    ("temperature_min", "temperature_max"),
+    ("humidity_min", "humidity_max"),
+    ("soil_moisture_min", "soil_moisture_max"),
+    ("light_min", "light_max"),
+]
+
+
+def _validate_crop_payload(payload):
+    errors = {}
+    data = {}
+
+    name = payload.get("name", "")
+    if not isinstance(name, str) or not name.strip():
+        errors["name"] = "required"
+    else:
+        data["name"] = name.strip()
+
+    for key in CROP_VALUE_FIELDS:
+        if key not in payload:
+            errors[key] = "required"
+            continue
+        try:
+            v = payload[key]
+            if isinstance(v, bool):
+                raise ValueError
+            v = float(v)
+            data[key] = int(v) if v.is_integer() else v
+        except (TypeError, ValueError):
+            errors[key] = "must be a number"
+
+    for min_key, max_key in _CROP_PAIRS:
+        if min_key in data and max_key in data and data[min_key] > data[max_key]:
+            errors[min_key] = "최솟값은 최댓값보다 클 수 없습니다."
+
+    notes_raw = payload.get("notes", [])
+    data["notes"] = [str(n) for n in notes_raw if n] if isinstance(notes_raw, list) else []
+
+    return data, errors
+
+
+@app.route("/api/crops", methods=["GET"])
+def get_crops():
+    return jsonify(list_crops())
+
+
+@app.route("/api/crops", methods=["POST"])
+def post_crop():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "No JSON received"}), 400
+    data, errors = _validate_crop_payload(payload)
+    if errors:
+        return jsonify({"error": "Invalid crop data", "details": errors}), 400
+    try:
+        return jsonify(create_crop(data)), 201
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/crops/<int:crop_id>", methods=["PUT"])
+def put_crop(crop_id):
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "No JSON received"}), 400
+    data, errors = _validate_crop_payload(payload)
+    if errors:
+        return jsonify({"error": "Invalid crop data", "details": errors}), 400
+    result = update_crop(crop_id, data)
+    if not result:
+        return jsonify({"error": "Crop not found"}), 404
+    return jsonify(result)
+
+
+@app.route("/api/crops/<int:crop_id>", methods=["DELETE"])
+def del_crop(crop_id):
+    ok, msg = delete_crop(crop_id)
+    if not ok:
+        return jsonify({"error": msg}), 400
+    return jsonify({"ok": True})
+
+
+@app.route("/api/crops/device", methods=["GET"])
+def get_crop_for_device():
+    device_id = (request.args.get("device_id") or "").strip()
+    if not device_id:
+        return jsonify({"error": "device_id required"}), 400
+    return jsonify(get_device_crop(device_id))
+
+
+@app.route("/api/crops/device", methods=["PUT"])
+def set_crop_for_device():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "No JSON received"}), 400
+    device_id = (payload.get("device_id") or "").strip()
+    crop_id = payload.get("crop_id")
+    if not device_id:
+        return jsonify({"error": "device_id required"}), 400
+    if not isinstance(crop_id, int):
+        return jsonify({"error": "crop_id must be an integer"}), 400
+    result = set_device_crop(device_id, crop_id)
+    if not result:
+        return jsonify({"error": "Crop not found"}), 404
+    return jsonify(result)
 
 
 if __name__ == "__main__":
