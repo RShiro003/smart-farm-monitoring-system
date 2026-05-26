@@ -16,13 +16,17 @@ inserted into the `sensor_data` SQLite table, and only the columns defined in
 
 ## Multiple ESP32 Sensor Nodes
 
-To add another ESP32 board, change only the `DEVICE_ID` constant near the top of
-that board's `src/main.cpp` before flashing:
+ESP32 Wi-Fi credentials, Raspberry Pi server URLs, and `DEVICE_ID` values are
+kept out of `src/main.cpp`. For each ESP32 PlatformIO project, copy the example
+file and fill in local values before flashing:
 
-```cpp
-const char* DEVICE_ID = "esp32_01";
+```text
+esp32-dummy-node/include/secrets.example.h -> esp32-dummy-node/include/secrets.h
+esp32-real-sensor-node/include/secrets.example.h -> esp32-real-sensor-node/include/secrets.h
 ```
 
-Use a different value for each board, for example `esp32_01`, `esp32_02`, and
-`esp32_greenhouse_north`. The dashboard and `/api/sensor?device_id=...` filter
-data by this value.
+`include/secrets.h` is ignored by Git, so keep the real `WIFI_SSID`,
+`WIFI_PASSWORD`, `SERVER_URL`, `THRESHOLDS_URL` if present, and `DEVICE_ID`
+there. Use a different `DEVICE_ID` for each board, for example `esp32_01`,
+`esp32_02`, and `esp32_greenhouse_north`. The dashboard and
+`/api/sensor?device_id=...` filter data by this value.

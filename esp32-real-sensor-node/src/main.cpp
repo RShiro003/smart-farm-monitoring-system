@@ -5,17 +5,15 @@
 #include <DHT.h>
 #include <time.h>
 
+#include "secrets.h"
+
 // 실제 센서 노드용 ESP32 코드다.
 // DHT22, 토양수분 센서, 조도 디지털 센서를 읽고 Flask 서버의 /api/sensor로 JSON을 전송한다.
 // 또한 서버의 /api/thresholds에서 장치별 임계값을 가져와 LED 상태 표시 기준으로 사용한다.
-const char* ssid = "TP-Link_31CA";
-const char* password = "54299979";
-
-const char* serverUrl = "http://192.168.1.106:5000/api/sensor";
-const char* thresholdsUrl = "http://192.168.1.106:5000/api/thresholds";
+// Wi-Fi, Flask server URLs, and DEVICE_ID are defined in include/secrets.h.
+// Copy include/secrets.example.h to include/secrets.h and fill in local values before flashing.
 // 여러 ESP32가 한 Raspberry Pi 서버로 데이터를 보내므로 보드마다 고유한 DEVICE_ID가 필요하다.
 // 서버 DB의 device_id 컬럼, 대시보드 장치 필터, 임계값 설정 조회가 모두 이 값으로 연결된다.
-const char* DEVICE_ID = "esp32_sensor";
 // 임계값은 사용자가 대시보드에서 바꿀 수 있으므로 주기적으로 서버에서 다시 가져온다.
 const unsigned long THRESHOLD_FETCH_INTERVAL_MS = 45000;
 // 네트워크가 불안정할 때 loop가 오래 멈추지 않도록 HTTP/Wi-Fi 대기 시간을 제한한다.
@@ -96,7 +94,7 @@ void connectWiFi() {
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
 
-  WiFi.begin(ssid, password);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   Serial.print("WiFi connecting");
 
   unsigned long startedAt = millis();
@@ -188,7 +186,7 @@ bool fetchThresholdsFromServer() {
   }
 
   HTTPClient http;
-  String requestUrl = String(thresholdsUrl) + "?device_id=" + String(DEVICE_ID);
+  String requestUrl = String(THRESHOLDS_URL) + "?device_id=" + String(DEVICE_ID);
 
   http.begin(requestUrl);
   http.setTimeout(HTTP_TIMEOUT_MS);
@@ -388,7 +386,7 @@ void loop() {
 
     // Flask 서버의 센서 수집 endpoint로 전송한다.
     // Content-Type이 application/json이어야 Flask request.get_json()이 body를 dict로 해석한다.
-    http.begin(serverUrl);
+    http.begin(SERVER_URL);
     http.setTimeout(HTTP_TIMEOUT_MS);
     http.addHeader("Content-Type", "application/json");
 

@@ -3,16 +3,15 @@
 #include <HTTPClient.h>
 #include <time.h>
 
+#include "secrets.h"
+
 // 더미 노드는 실제 센서가 없어도 Flask 서버와 대시보드 흐름을 테스트하기 위한 ESP32 코드다.
 // Wi-Fi 연결, NTP 시간 동기화, JSON 생성, /api/sensor POST 전송은 실제 노드와 같은 흐름을 사용하고,
 // 센서값만 시간대/랜덤/이상상태 시뮬레이션으로 만든다.
-const char* ssid = "TP-Link_31CA";
-const char* password = "54299979";
-
-const char* serverUrl = "http://192.168.1.106:5000/api/sensor";
+// Wi-Fi, Flask server URL, and DEVICE_ID are defined in include/secrets.h.
+// Copy include/secrets.example.h to include/secrets.h and fill in local values before flashing.
 // 여러 ESP32가 같은 서버로 데이터를 보내므로, 플래시 전에 보드마다 다른 DEVICE_ID를 넣어야 한다.
 // 서버와 대시보드는 이 값을 기준으로 데이터 필터링과 장치 선택을 수행한다.
-const char* DEVICE_ID = "esp32_dummy";
 
 // ESP32 timestamp는 NTP로 맞춘 한국 시간(UTC+9)을 사용한다.
 // 서버는 별도로 server_received_at을 저장하므로, ESP32 시간이 실패해도 수신 시각은 남는다.
@@ -326,7 +325,7 @@ void setup() {
 
   // 서버로 POST하려면 Wi-Fi 연결이 먼저 필요하다.
   // 더미 노드는 테스트용이라 연결될 때까지 대기한 뒤 다음 단계로 진행한다.
-  WiFi.begin(ssid, password);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   Serial.print("WiFi connecting");
 
   while (WiFi.status() != WL_CONNECTED) {
@@ -404,7 +403,7 @@ void loop() {
 
     // Flask 서버의 센서 수집 API로 전송한다.
     // Content-Type을 JSON으로 지정해야 request.get_json()이 정상적으로 body를 파싱한다.
-    http.begin(serverUrl);
+    http.begin(SERVER_URL);
     http.addHeader("Content-Type", "application/json");
 
     String jsonData = "{";
