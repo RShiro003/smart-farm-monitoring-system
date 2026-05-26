@@ -148,6 +148,19 @@ _init_db()
 
 # ── Public API ─────────────────────────────────────────────────────────────────
 
+def _process_alerts_after_save(record):
+    # 알림 처리 실패가 ESP32의 /api/sensor POST 실패로 이어지면 안 된다.
+    # 센서 row 저장을 먼저 확정한 뒤, 임계값/Discord 처리는 별도 단계에서 안전하게 시도한다.
+    try:
+        try:
+            from services.alert_service import process_sensor_alerts
+        except ModuleNotFoundError:
+            from app.services.alert_service import process_sensor_alerts
+
+        process_sensor_alerts(record)
+    except Exception as e:
+        print(f"[Alert] Sensor alert processing skipped: {e}")
+
 def load_sensor_data():
     # 대시보드, 상태 API, /api/sensor GET이 공통으로 사용하는 SELECT 함수다.
     # id ASC는 저장 순서 그대로, 즉 오래된 데이터에서 최신 데이터 순서로 반환한다.
@@ -171,15 +184,20 @@ def append_sensor_data(new_record):
     """
     record = normalize_sensor_record(new_record)
     conn = _connect()
+    saved = False
     try:
         # INSERT와 commit을 한 함수 안에서 묶어 ESP32 POST 한 건이 DB row 한 건으로 확정되게 한다.
         _insert(conn, record)
         conn.commit()
+        saved = True
     except sqlite3.Error:
         conn.rollback()
         raise
     finally:
         conn.close()
+
+    if saved:
+        _process_alerts_after_save(record)
 
 
 def filter_sensor_data(data, device_id=None):
