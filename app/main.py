@@ -9,8 +9,7 @@ try:
     from routes.dashboard import dashboard_bp
     from routes.sensor import sensor_bp
     from services.sensor_service import (
-        latest_sensor_record,
-        load_sensor_data,
+        get_latest_sensor_record,
     )
     from services.threshold_service import (
         THRESHOLD_FIELDS,
@@ -30,8 +29,7 @@ except ModuleNotFoundError:
     from app.routes.dashboard import dashboard_bp
     from app.routes.sensor import sensor_bp
     from app.services.sensor_service import (
-        latest_sensor_record,
-        load_sensor_data,
+        get_latest_sensor_record,
     )
     from app.services.threshold_service import (
         THRESHOLD_FIELDS,
@@ -133,12 +131,9 @@ def home():
 def status():
     # 서버가 살아 있는지 간단히 확인하는 상태 API다.
     # 최신 센서 row도 함께 내려주기 때문에 ESP32 수신 여부를 빠르게 점검할 수 있다.
-    data = load_sensor_data()
-    latest = latest_sensor_record(data)
-
     return jsonify({
         "message": "Smart Farm Server Running",
-        "latest": latest
+        "latest": get_latest_sensor_record()
     })
 
 

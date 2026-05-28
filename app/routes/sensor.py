@@ -1,4 +1,5 @@
 from datetime import datetime
+from time import perf_counter
 
 from flask import Blueprint, jsonify, request
 
@@ -8,15 +9,13 @@ from flask import Blueprint, jsonify, request
 try:
     from services.sensor_service import (
         append_sensor_data,
-        filter_sensor_data,
-        load_sensor_data,
+        list_sensor_records,
         normalize_device_filter,
     )
 except ModuleNotFoundError:
     from app.services.sensor_service import (
         append_sensor_data,
-        filter_sensor_data,
-        load_sensor_data,
+        list_sensor_records,
         normalize_device_filter,
     )
 
@@ -116,8 +115,16 @@ def get_sensor_data():
     # 대시보드의 현재값 카드가 전체 row를 받아 마지막 row를 사용하고,
     # 외부 테스트에서도 같은 엔드포인트로 저장 결과를 확인한다.
     # device_id 쿼리가 있으면 특정 ESP32 데이터만 내려주고, 없거나 all이면 전체 장치를 내려준다.
+    start = perf_counter()
     device_id = normalize_device_filter(request.args.get("device_id"))
-    data = filter_sensor_data(load_sensor_data(), device_id)
+    include_all = (request.args.get("all") or "").strip().lower() == "true"
+    try:
+        limit = int(request.args.get("limit", 500))
+    except (TypeError, ValueError):
+        limit = 500
+    data = list_sensor_records(device_id, limit=limit, include_all=include_all)
+    suffix = " all=true" if include_all else f" limit={max(1, min(limit, 5000))}"
+    print(f"[sensor.get] {perf_counter() - start:.3f}s rows={len(data)}{suffix}")
     # SQLite의 autoincrement id 기준 오름차순으로 읽기 때문에 응답은 오래된 값에서 최신 값 순서다.
     return jsonify(data)
 

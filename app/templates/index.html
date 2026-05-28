@@ -964,6 +964,24 @@ function apiUrl(path, values = {}) {
     return query ? `${path}?${query}` : path;
 }
 
+const REQUESTS = {};
+
+async function fetchJson(key, url) {
+    if (REQUESTS[key]) REQUESTS[key].abort();
+    const controller = new AbortController();
+    REQUESTS[key] = controller;
+
+    try {
+        const res = await fetch(url, { signal: controller.signal });
+        return await res.json();
+    } catch (e) {
+        if (e.name === 'AbortError') return undefined;
+        throw e;
+    } finally {
+        if (REQUESTS[key] === controller) delete REQUESTS[key];
+    }
+}
+
 // 임계값 입력 폼과 서버 API가 공유하는 필드 목록이다.
 // 각 input id는 threshold_${field} 형태이므로, 목록 하나로 입력 조회/검증/채우기를 반복 처리한다.
 const THRESHOLD_FIELDS = [
@@ -1669,14 +1687,11 @@ async function confirmDeleteCrop(cropId, cropName) {
 
 // ── Latest sensor values ─────────────────────────────────
 async function refreshLatest() {
-    // /api/sensor는 오래된 row부터 최신 row까지 반환하므로 마지막 row를 현재값으로 사용한다.
-    // timestamp보다 server_received_at을 우선 표시해 서버가 실제로 받은 시각을 기준으로 대시보드를 보여준다.
     try {
-        const res = await fetch(apiUrl('/api/sensor'));
-        const rows = await res.json();
-        const d = rows.length ? rows[rows.length - 1] : null;
+        const d = await fetchJson('latest', apiUrl('/api/dashboard/latest'));
+        if (d === undefined) return;
 
-        const val = (key, alt) => d[key] ?? (alt ? d[alt] : null) ?? '—';
+        const val = (key, alt) => d?.[key] ?? (alt ? d?.[alt] : null) ?? '—';
         document.getElementById('live-temp').textContent  = d ? val('temperature') : '—';
         document.getElementById('live-hum').textContent   = d ? val('humidity') : '—';
         document.getElementById('live-soil').textContent  = d ? val('soil_moisture') : '—';
@@ -1695,8 +1710,8 @@ async function loadCharts(period) {
     // 서버에서 period별로 집계된 labels와 평균 배열을 받아 Chart.js dataset에 반영한다.
     // 실제 데이터 뒤에 예측 포인트를 추가해 점선으로 미래 추세를 표시한다.
     try {
-        const res = await fetch(apiUrl('/api/dashboard/chart', { period }));
-        const data = await res.json();
+        const data = await fetchJson('chart', apiUrl('/api/dashboard/chart', { period }));
+        if (data === undefined) return;
         const numPred = PREDICT_COUNTS[period] ?? 3;
 
         for (const [name, key] of CHART_KEYS) {
@@ -1745,8 +1760,8 @@ async function loadAverages(period) {
     // 기간별 평균 카드는 /api/dashboard/stats 응답만 사용한다.
     // 서버가 count도 함께 반환하므로 평균이 몇 건의 데이터로 계산됐는지 보조 문구에 표시할 수 있다.
     try {
-        const res = await fetch(apiUrl('/api/dashboard/stats', { period }));
-        const d = await res.json();
+        const d = await fetchJson('stats', apiUrl('/api/dashboard/stats', { period }));
+        if (d === undefined) return;
 
         document.getElementById('avg-temp').textContent  = d.temperature   ?? '—';
         document.getElementById('avg-hum').textContent   = d.humidity      ?? '—';
@@ -1772,6 +1787,7 @@ function setAvgPeriod(period, btn) {
 // ── History ───────────────────────────────────────────────
 let historyPage    = 1;
 let historyFilters = { date: '', time_from: '', time_to: '' };
+let historyMeta    = { page: null, pages: null, total: null, per_page: null };
 
 async function loadHistory(page = 1) {
     // 전체 기록 표는 페이지네이션과 날짜/시간 검색 조건을 서버에 넘겨 필요한 구간만 받는다.
@@ -1784,11 +1800,26 @@ async function loadHistory(page = 1) {
     if (historyFilters.time_to)   params.append('time_to',   historyFilters.time_to);
 
     try {
-        const res  = await fetch(`/api/dashboard/history?${params}`);
-        const data = await res.json();
+        const data = await fetchJson('history', `/api/dashboard/history?${params}`);
+        if (data === undefined) return;
+        historyPage = data.page;
         renderHistoryTable(data.items, data.page, data.per_page);
-        renderPagination(data.page, data.pages, data.total);
-        document.getElementById('history-total').textContent = data.total;
+
+        const metaChanged =
+            data.page !== historyMeta.page ||
+            data.pages !== historyMeta.pages ||
+            data.total !== historyMeta.total ||
+            data.per_page !== historyMeta.per_page;
+        if (metaChanged) {
+            renderPagination(data.page, data.pages, data.total);
+            document.getElementById('history-total').textContent = data.total;
+            historyMeta = {
+                page: data.page,
+                pages: data.pages,
+                total: data.total,
+                per_page: data.per_page,
+            };
+        }
     } catch (e) {
         console.error('History load failed:', e);
     }
@@ -1867,35 +1898,16 @@ function clearFilters() {
     loadHistory(1);
 }
 
-// ── Full refresh (called on data change) ─────────────────
-async function refreshAll() {
-    // 새 센서 row가 감지되면 현재값, 평균, 그래프, 기록 표를 동시에 갱신한다.
-    // Promise.all을 사용해 서로 독립적인 API 호출을 병렬로 실행한다.
-    await Promise.all([
-        refreshLatest(),
-        loadAverages(currentAvgPeriod),
-        loadCharts(currentChartPeriod),
-        loadHistory(historyPage),
-    ]);
+function refreshVisibleHistory() {
+    if (historyPage === 1) loadHistory(1);
 }
 
-// ── Polling for data changes ─────────────────────────────
-let _lastMtime = null;
-
-async function pollMtime() {
-    // 대시보드는 WebSocket 대신 가벼운 폴링으로 새 데이터 여부를 확인한다.
-    // /api/dashboard/mtime의 MAX(id)가 바뀌면 SQLite에 새 row가 들어온 것이므로 전체 갱신을 수행한다.
-    try {
-        const res = await fetch(apiUrl('/api/dashboard/mtime'));
-        const { mtime } = await res.json();
-        if (_lastMtime !== null && mtime !== _lastMtime) {
-            await refreshAll();
-        }
-        _lastMtime = mtime;
-    } catch (e) {
-        console.error('Mtime poll failed:', e);
-    }
-}
+const REFRESH_MS = {
+    latest: 5000,
+    chart: 20000,
+    averages: 30000,
+    history: 30000,
+};
 
 // ── Init ─────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
@@ -1904,11 +1916,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     await loadActiveCrop();
     loadThresholds(SELECTED_DEVICE_ID);
 
-    loadAverages('daily');
-    loadCharts('hourly');
+    refreshLatest();
+    loadAverages(currentAvgPeriod);
+    loadCharts(currentChartPeriod);
     loadHistory(1);
-    pollMtime();
-    setInterval(pollMtime, 3000);
+
+    setInterval(refreshLatest, REFRESH_MS.latest);
+    setInterval(() => loadCharts(currentChartPeriod), REFRESH_MS.chart);
+    setInterval(() => loadAverages(currentAvgPeriod), REFRESH_MS.averages);
+    setInterval(refreshVisibleHistory, REFRESH_MS.history);
 });
 </script>
 

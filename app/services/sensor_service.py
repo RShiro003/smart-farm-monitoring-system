@@ -1,7 +1,7 @@
 import json
 import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 
 
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -87,6 +87,94 @@ def _row_to_dict(row):
     return {k: row[k] for k in row.keys() if row[k] is not None and k != "id"}
 
 
+_TIME_EXPR = (
+    "replace(COALESCE(NULLIF(server_received_at, ''), "
+    "NULLIF(time, ''), NULLIF(timestamp, '')), 'T', ' ')"
+)
+
+
+def _normalize_positive_int(value, default, maximum=None):
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = default
+    number = max(1, number)
+    if maximum is not None:
+        number = min(number, maximum)
+    return number
+
+
+def _valid_hhmm(value):
+    value = (value or "").strip()
+    if not value:
+        return ""
+    try:
+        datetime.strptime(value, "%H:%M")
+        return value
+    except ValueError:
+        return ""
+
+
+def _valid_date(value):
+    value = (value or "").strip()
+    if not value:
+        return ""
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+        return value
+    except ValueError:
+        return ""
+
+
+def _history_where(device_id=None, date=None, time_from=None, time_to=None):
+    clauses = []
+    params = []
+
+    selected = normalize_device_filter(device_id)
+    if selected is not None:
+        clauses.append("device_id = ?")
+        params.append(selected)
+
+    date = (date or "").strip()
+    time_from = _valid_hhmm(time_from)
+    time_to = _valid_hhmm(time_to)
+
+    if date:
+        valid_date = _valid_date(date)
+        if not valid_date:
+            clauses.append("0 = 1")
+        else:
+            start_time = time_from or "00:00"
+            start_at = f"{valid_date} {start_time}:00"
+            clauses.append("server_received_at >= ?")
+            params.append(start_at)
+
+            if time_to:
+                clauses.append("server_received_at <= ?")
+                params.append(f"{valid_date} {time_to}:00")
+            else:
+                next_day = datetime.strptime(valid_date, "%Y-%m-%d") + timedelta(days=1)
+                clauses.append("server_received_at < ?")
+                params.append(next_day.strftime("%Y-%m-%d 00:00:00"))
+    else:
+        if time_from:
+            clauses.append(f"time({_TIME_EXPR}) >= time(?)")
+            params.append(time_from)
+
+        if time_to:
+            clauses.append(f"time({_TIME_EXPR}) <= time(?)")
+            params.append(time_to)
+
+    if not clauses:
+        return "", params
+    return " WHERE " + " AND ".join(clauses), params
+
+
+def _period_cutoff(period, mapping, default_key):
+    delta = mapping.get(period, mapping[default_key])
+    return (datetime.now() - delta).strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _migrate_from_json(conn):
     # 예전 버전이 sensor_data.json에 저장하던 데이터를 SQLite로 가져오기 위한 호환 코드다.
     # 새 데이터는 이 함수로 들어오지 않고 append_sensor_data()를 통해 바로 SQLite에 저장된다.
@@ -134,6 +222,11 @@ def _init_db():
                 time               TEXT
             )
         """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sensor_data_device_id ON sensor_data(device_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sensor_data_id ON sensor_data(id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sensor_data_device_id_id ON sensor_data(device_id, id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sensor_data_received_at ON sensor_data(server_received_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sensor_data_device_received ON sensor_data(device_id, server_received_at)")
         conn.commit()
         # 새 DB가 비어 있을 때만 레거시 JSON을 가져온다.
         # 이미 SQLite에 row가 있으면 중복 import를 막기 위해 JSON을 다시 읽지 않는다.
@@ -172,6 +265,232 @@ def load_sensor_data():
         return [_row_to_dict(row) for row in rows]
     except sqlite3.Error:
         return []
+    finally:
+        conn.close()
+
+
+def list_sensor_records(device_id=None, limit=500, include_all=False):
+    selected = normalize_device_filter(device_id)
+    where = ""
+    params = []
+    if selected is not None:
+        where = " WHERE device_id = ?"
+        params.append(selected)
+
+    conn = _connect()
+    try:
+        if include_all:
+            rows = conn.execute(
+                f"SELECT * FROM sensor_data{where} ORDER BY id ASC",
+                params,
+            ).fetchall()
+        else:
+            safe_limit = _normalize_positive_int(limit, 500, maximum=5000)
+            rows = conn.execute(
+                f"""
+                SELECT * FROM (
+                    SELECT * FROM sensor_data{where}
+                    ORDER BY id DESC
+                    LIMIT ?
+                )
+                ORDER BY id ASC
+                """,
+                params + [safe_limit],
+            ).fetchall()
+        return [_row_to_dict(row) for row in rows]
+    except sqlite3.Error:
+        return []
+    finally:
+        conn.close()
+
+
+def get_latest_sensor_record(device_id=None):
+    selected = normalize_device_filter(device_id)
+    where = ""
+    params = []
+    if selected is not None:
+        where = " WHERE device_id = ?"
+        params.append(selected)
+
+    conn = _connect()
+    try:
+        row = conn.execute(
+            f"SELECT * FROM sensor_data{where} ORDER BY id DESC LIMIT 1",
+            params,
+        ).fetchone()
+        return _row_to_dict(row) if row else None
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+
+
+def list_device_ids_from_db():
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT device_id FROM sensor_data ORDER BY device_id"
+        ).fetchall()
+        return [
+            normalize_device_id(row["device_id"])
+            for row in rows
+            if row["device_id"] is not None
+        ]
+    except sqlite3.Error:
+        return []
+    finally:
+        conn.close()
+
+
+def get_sensor_history(device_id=None, page=1, per_page=10, date=None, time_from=None, time_to=None):
+    page = _normalize_positive_int(page, 1)
+    per_page = _normalize_positive_int(per_page, 10, maximum=200)
+    offset = (page - 1) * per_page
+    where, params = _history_where(device_id, date, time_from, time_to)
+
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            f"SELECT * FROM sensor_data{where} ORDER BY id DESC LIMIT ? OFFSET ?",
+            params + [per_page, offset],
+        ).fetchall()
+        return [_row_to_dict(row) for row in rows]
+    except sqlite3.Error:
+        return []
+    finally:
+        conn.close()
+
+
+def count_sensor_history(device_id=None, date=None, time_from=None, time_to=None):
+    where, params = _history_where(device_id, date, time_from, time_to)
+    conn = _connect()
+    try:
+        row = conn.execute(
+            f"SELECT COUNT(*) FROM sensor_data{where}",
+            params,
+        ).fetchone()
+        return int(row[0] or 0)
+    except sqlite3.Error:
+        return 0
+    finally:
+        conn.close()
+
+
+def get_sensor_rows_for_chart(device_id=None, period="hourly", limit=300):
+    chart_windows = {
+        "hourly": timedelta(hours=24),
+        "daily": timedelta(days=7),
+        "weekly": timedelta(weeks=8),
+        "monthly": timedelta(days=365),
+    }
+    bucket_exprs = {
+        "hourly": "strftime('%Y-%m-%d %H:00:00', server_received_at)",
+        "daily": "strftime('%Y-%m-%d 00:00:00', server_received_at)",
+        "weekly": (
+            "date(server_received_at, '-' || "
+            "((CAST(strftime('%w', server_received_at) AS INTEGER) + 6) % 7) || "
+            "' days') || ' 00:00:00'"
+        ),
+        "monthly": "strftime('%Y-%m-01 00:00:00', server_received_at)",
+    }
+    period = period if period in chart_windows else "hourly"
+    safe_limit = _normalize_positive_int(limit, 300, maximum=5000)
+
+    clauses = ["server_received_at >= ?"]
+    params = [_period_cutoff(period, chart_windows, "hourly")]
+    selected = normalize_device_filter(device_id)
+    if selected is not None:
+        clauses.append("device_id = ?")
+        params.append(selected)
+
+    where = " WHERE " + " AND ".join(clauses)
+    bucket_expr = bucket_exprs[period]
+
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT
+                bucket AS server_received_at,
+                AVG(temperature) AS temperature,
+                AVG(humidity) AS humidity,
+                AVG(soil_moisture) AS soil_moisture,
+                AVG(COALESCE(light, light_digital)) AS light,
+                COUNT(*) AS bucket_count
+            FROM (
+                SELECT
+                    {bucket_expr} AS bucket,
+                    temperature,
+                    humidity,
+                    soil_moisture,
+                    light,
+                    light_digital
+                FROM sensor_data
+                {where}
+            )
+            WHERE bucket IS NOT NULL
+            GROUP BY bucket
+            ORDER BY bucket ASC
+            LIMIT ?
+            """,
+            params + [safe_limit],
+        ).fetchall()
+        return [_row_to_dict(row) for row in rows]
+    except sqlite3.Error:
+        return []
+    finally:
+        conn.close()
+
+
+def get_sensor_stats(device_id=None, period="daily"):
+    stat_windows = {
+        "daily": timedelta(days=1),
+        "weekly": timedelta(days=7),
+        "monthly": timedelta(days=30),
+    }
+    period = period if period in stat_windows else "daily"
+
+    clauses = ["server_received_at >= ?"]
+    params = [_period_cutoff(period, stat_windows, "daily")]
+    selected = normalize_device_filter(device_id)
+    if selected is not None:
+        clauses.insert(0, "device_id = ?")
+        params.insert(0, selected)
+
+    conn = _connect()
+    try:
+        row = conn.execute(
+            f"""
+            SELECT
+                AVG(temperature) AS temperature,
+                AVG(humidity) AS humidity,
+                AVG(soil_moisture) AS soil_moisture,
+                AVG(COALESCE(light, light_digital)) AS light,
+                COUNT(*) AS count
+            FROM sensor_data
+            WHERE {' AND '.join(clauses)}
+            """,
+            params,
+        ).fetchone()
+
+        def rounded(value):
+            return round(float(value), 1) if value is not None else None
+
+        return {
+            "temperature": rounded(row["temperature"]),
+            "humidity": rounded(row["humidity"]),
+            "soil_moisture": rounded(row["soil_moisture"]),
+            "light": rounded(row["light"]),
+            "count": int(row["count"] or 0),
+        }
+    except sqlite3.Error:
+        return {
+            "temperature": None,
+            "humidity": None,
+            "soil_moisture": None,
+            "light": None,
+            "count": 0,
+        }
     finally:
         conn.close()
 
