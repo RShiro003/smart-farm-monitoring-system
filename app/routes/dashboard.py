@@ -184,3 +184,15 @@ def dashboard_mtime():
     mtime = sensor_data_mtime()
     _log_api("mtime", start)
     return jsonify({"mtime": mtime})
+
+
+@dashboard_bp.route("/api/dashboard/devices")
+def dashboard_devices():
+    start = perf_counter()
+    selected_device_id = _selected_device_id()
+    devices = _device_options(selected_device_id)
+    _log_api("devices", start, count=len(devices))
+    return jsonify({
+        "devices": devices,
+        "current_device_id": selected_device_id,
+    })

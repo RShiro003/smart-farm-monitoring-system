@@ -1902,7 +1902,78 @@ function refreshVisibleHistory() {
     if (historyPage === 1) loadHistory(1);
 }
 
+function syncDeviceOptions(devices) {
+    const select = document.getElementById('device-select');
+    if (!select) return;
+
+    const selected = SELECTED_DEVICE_ID || 'all';
+    const values = ['all', ...devices];
+    const currentValues = Array.from(select.options).map(option => option.value);
+    if (
+        currentValues.length === values.length &&
+        currentValues.every((value, index) => value === values[index])
+    ) {
+        return;
+    }
+
+    select.innerHTML = '';
+    const allOption = new Option('전체', 'all', false, selected === 'all');
+    select.add(allOption);
+
+    for (const device of devices) {
+        const option = new Option(device, device, false, device === SELECTED_DEVICE_ID);
+        select.add(option);
+    }
+
+    if (SELECTED_DEVICE_ID && !devices.includes(SELECTED_DEVICE_ID)) {
+        select.add(new Option(SELECTED_DEVICE_ID, SELECTED_DEVICE_ID, false, true));
+    }
+}
+
+async function refreshDeviceOptions() {
+    try {
+        const data = await fetchJson('devices', apiUrl('/api/dashboard/devices'));
+        if (data === undefined) return;
+        syncDeviceOptions(data.devices ?? []);
+    } catch (e) {
+        console.error('Device list refresh failed:', e);
+    }
+}
+
+async function refreshOnSensorChange() {
+    const tasks = [
+        refreshLatest(),
+        loadAverages(currentAvgPeriod),
+        loadCharts(currentChartPeriod),
+        refreshDeviceOptions(),
+    ];
+    if (historyPage === 1) tasks.push(loadHistory(1));
+    await Promise.all(tasks);
+}
+
+let _lastMtime = null;
+
+async function pollSensorChanges() {
+    try {
+        const data = await fetchJson('mtime', apiUrl('/api/dashboard/mtime'));
+        if (data === undefined) return;
+
+        const mtime = data.mtime ?? 0;
+        if (_lastMtime === null) {
+            _lastMtime = mtime;
+            return;
+        }
+        if (mtime !== _lastMtime) {
+            _lastMtime = mtime;
+            await refreshOnSensorChange();
+        }
+    } catch (e) {
+        console.error('Sensor change poll failed:', e);
+    }
+}
+
 const REFRESH_MS = {
+    change: 3000,
     latest: 5000,
     chart: 20000,
     averages: 30000,
@@ -1920,7 +1991,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     loadAverages(currentAvgPeriod);
     loadCharts(currentChartPeriod);
     loadHistory(1);
+    refreshDeviceOptions();
+    pollSensorChanges();
 
+    setInterval(pollSensorChanges, REFRESH_MS.change);
     setInterval(refreshLatest, REFRESH_MS.latest);
     setInterval(() => loadCharts(currentChartPeriod), REFRESH_MS.chart);
     setInterval(() => loadAverages(currentAvgPeriod), REFRESH_MS.averages);
