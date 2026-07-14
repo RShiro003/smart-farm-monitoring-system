@@ -36,8 +36,6 @@ const int daylightOffset_sec = 0;
 
 // SEN0308을 실제 마른 흙과 젖은 흙에서 측정한 뒤 아래 두 값을 교체해야 한다.
 // 현재는 기존 변환 동작을 유지하기 위한 ESP32 12비트 ADC 양 끝값이다.
-const int SOIL_DRY_RAW = 4095;
-const int SOIL_WET_RAW = 0;
 const int SOIL_SAMPLE_COUNT = 10;
 const unsigned long SOIL_SAMPLE_INTERVAL_MS = 10;
 
@@ -69,6 +67,8 @@ struct ThresholdSettings {
   float soilMoistureMax;
   float lightMin;
   float lightMax;
+  int soilDryRaw;
+  int soilWetRaw;
 };
 
 // LED로 표현할 농장 상태.
@@ -85,7 +85,8 @@ ThresholdSettings thresholds = {
   18.0, 25.0,
   60.0, 80.0,
   40.0, 70.0,
-  0.0, 100.0
+  0.0, 100.0,
+  4095, 0
 };
 
 unsigned long lastThresholdFetchAt = 0;
@@ -193,6 +194,12 @@ void printThresholds() {
   Serial.print(thresholds.lightMin);
   Serial.print(" ~ ");
   Serial.println(thresholds.lightMax);
+
+  Serial.println("soil calibration raw:");
+  Serial.print("  dry: ");
+  Serial.println(thresholds.soilDryRaw);
+  Serial.print("  wet: ");
+  Serial.println(thresholds.soilWetRaw);
 }
 
 bool fetchThresholdsFromServer() {
@@ -238,6 +245,17 @@ bool fetchThresholdsFromServer() {
   next.soilMoistureMax = doc["soil_moisture_max"] | thresholds.soilMoistureMax;
   next.lightMin = doc["light_min"] | thresholds.lightMin;
   next.lightMax = doc["light_max"] | thresholds.lightMax;
+
+  int nextSoilDryRaw = doc["soil_dry_raw"] | thresholds.soilDryRaw;
+  int nextSoilWetRaw = doc["soil_wet_raw"] | thresholds.soilWetRaw;
+  if (nextSoilDryRaw >= 0 && nextSoilDryRaw <= 4095 &&
+      nextSoilWetRaw >= 0 && nextSoilWetRaw <= 4095 &&
+      nextSoilDryRaw > nextSoilWetRaw) {
+    next.soilDryRaw = nextSoilDryRaw;
+    next.soilWetRaw = nextSoilWetRaw;
+  } else {
+    Serial.println("Invalid soil calibration ignored");
+  }
 
   thresholds = next;
   Serial.println("Threshold GET success");
@@ -366,13 +384,20 @@ void loop() {
   // 토양수분 변환.
   // 현재 보정 상수는 기존 동작을 유지하는 초기값이며, SEN0308 현장 실측 후 반드시 수정해야 한다.
   // 서버에는 사람이 이해하기 쉬운 soil_moisture(%)와 보정용 soil_raw를 같이 보낸다.
-  int soilMoisture = map(
-    soilRaw,
-    SOIL_DRY_RAW,
-    SOIL_WET_RAW,
-    0,
-    100
-  );
+  int soilMoisture = 0;
+  if (thresholds.soilDryRaw >= 0 && thresholds.soilDryRaw <= 4095 &&
+      thresholds.soilWetRaw >= 0 && thresholds.soilWetRaw <= 4095 &&
+      thresholds.soilDryRaw > thresholds.soilWetRaw) {
+    soilMoisture = map(
+      soilRaw,
+      thresholds.soilDryRaw,
+      thresholds.soilWetRaw,
+      0,
+      100
+    );
+  } else {
+    Serial.println("Invalid soil calibration; soil moisture set to 0");
+  }
   soilMoisture = constrain(soilMoisture, 0, 100);
 
   Serial.println("----- SENSOR DATA -----");

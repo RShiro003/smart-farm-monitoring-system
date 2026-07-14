@@ -25,6 +25,11 @@ THRESHOLD_FIELDS = [
     "light_max",
 ]
 
+SOIL_CALIBRATION_FIELDS = [
+    "soil_dry_raw",
+    "soil_wet_raw",
+]
+
 # 장치별 임계값이 아직 저장되지 않았을 때 사용하는 초기값이다.
 # ESP32는 부팅 직후 서버에서 임계값을 가져오므로, DB에 row가 없어도 바로 LED 판단을 시작할 수 있어야 한다.
 DEFAULT_THRESHOLDS = {
@@ -36,6 +41,8 @@ DEFAULT_THRESHOLDS = {
     "soil_moisture_max": 70,
     "light_min": 0,
     "light_max": 100,
+    "soil_dry_raw": 4095,
+    "soil_wet_raw": 0,
 }
 
 # Flask 개발 서버나 브라우저/ESP32 요청이 겹칠 수 있어 임계값 DB 접근은 lock으로 직렬화한다.
@@ -69,10 +76,24 @@ def _ensure_table(conn):
             soil_moisture_max REAL NOT NULL DEFAULT 70,
             light_min REAL NOT NULL DEFAULT 0,
             light_max REAL NOT NULL DEFAULT 100,
+            soil_dry_raw INTEGER NOT NULL DEFAULT 4095,
+            soil_wet_raw INTEGER NOT NULL DEFAULT 0,
             updated_at TEXT NOT NULL
         )
         """
     )
+
+    # 기존 DB는 CREATE TABLE IF NOT EXISTS만으로 새 컬럼이 생기지 않으므로
+    # 실제 컬럼 목록을 확인한 뒤 없는 보정 컬럼만 안전하게 추가한다.
+    columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(threshold_settings)")
+    }
+    for field in SOIL_CALIBRATION_FIELDS:
+        if field not in columns:
+            conn.execute(
+                f"ALTER TABLE threshold_settings ADD COLUMN {field} "
+                f"INTEGER NOT NULL DEFAULT {DEFAULT_THRESHOLDS[field]}"
+            )
     conn.commit()
 
 
@@ -97,7 +118,7 @@ def _row_to_thresholds(row):
         return None
 
     data = {"device_id": row["device_id"]}
-    for field in THRESHOLD_FIELDS:
+    for field in THRESHOLD_FIELDS + SOIL_CALIBRATION_FIELDS:
         data[field] = _format_number(row[field])
     return data
 
@@ -126,9 +147,11 @@ def _insert_thresholds(conn, settings):
             soil_moisture_max,
             light_min,
             light_max,
+            soil_dry_raw,
+            soil_wet_raw,
             updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             settings["device_id"],
@@ -140,6 +163,8 @@ def _insert_thresholds(conn, settings):
             settings["soil_moisture_max"],
             settings["light_min"],
             settings["light_max"],
+            settings["soil_dry_raw"],
+            settings["soil_wet_raw"],
             now,
         ),
     )
@@ -173,23 +198,24 @@ def get_or_create_thresholds(device_id):
 def upsert_thresholds(device_id, values):
     # 대시보드 임계값 저장 버튼이 호출하는 함수다.
     # 이미 장치 row가 있으면 UPDATE, 없으면 INSERT하여 API 호출자는 같은 endpoint만 사용하면 된다.
-    settings = {"device_id": device_id}
-    for field in THRESHOLD_FIELDS:
-        settings[field] = values[field]
-
     with _lock:
         with _connect() as conn:
             _ensure_table(conn)
-            exists = conn.execute(
+            existing = conn.execute(
                 """
-                SELECT id
+                SELECT *
                 FROM threshold_settings
                 WHERE device_id = ?
                 """,
                 (device_id,),
             ).fetchone()
 
-            if exists:
+            settings = default_thresholds(device_id)
+            if existing is not None:
+                settings.update(_row_to_thresholds(existing))
+            settings.update(values)
+
+            if existing is not None:
                 # 같은 device_id에는 하나의 설정 row만 유지한다.
                 # 최신 입력값으로 덮어써야 ESP32의 다음 임계값 GET에서 변경 사항이 반영된다.
                 conn.execute(
@@ -203,6 +229,8 @@ def upsert_thresholds(device_id, values):
                         soil_moisture_max = ?,
                         light_min = ?,
                         light_max = ?,
+                        soil_dry_raw = ?,
+                        soil_wet_raw = ?,
                         updated_at = ?
                     WHERE device_id = ?
                     """,
@@ -215,6 +243,8 @@ def upsert_thresholds(device_id, values):
                         settings["soil_moisture_max"],
                         settings["light_min"],
                         settings["light_max"],
+                        settings["soil_dry_raw"],
+                        settings["soil_wet_raw"],
                         _now_string(),
                         device_id,
                     ),
@@ -233,3 +263,13 @@ def upsert_thresholds(device_id, values):
                 (device_id,),
             ).fetchone()
             return _row_to_thresholds(row)
+
+
+def init_threshold_db():
+    # Flask 애플리케이션 import 시 기존 DB까지 마이그레이션해 첫 API 요청 전 스키마를 준비한다.
+    with _lock:
+        with _connect() as conn:
+            _ensure_table(conn)
+
+
+init_threshold_db()

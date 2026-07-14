@@ -452,6 +452,11 @@
         .threshold-message.ok { color: #4ade80; }
         .threshold-message.error { color: #f87171; }
 
+        .soil-raw-value { margin-top: 6px; font-size: 0.72rem; color: #94a3b8; }
+        .calibration-help { margin-top: 9px; font-size: 0.68rem; color: #64748b; line-height: 1.5; }
+        .calibration-buttons { display: flex; gap: 6px; margin-top: 6px; }
+        .calibration-buttons .btn { flex: 1; padding: 6px; font-size: 0.68rem; }
+
         /* ── Crop selector in panel header ── */
         .crop-select {
             background: transparent;
@@ -724,6 +729,7 @@
             <div class="card soil">
                 <div class="label">토양 수분</div>
                 <div class="value"><span id="live-soil">{% if latest and latest.soil_moisture is not none %}{{ latest.soil_moisture }}{% else %}—{% endif %}</span><span class="unit">%</span></div>
+                <div class="soil-raw-value">원시값: <span id="live-soil-raw">{% if latest and latest.soil_raw is not none %}{{ latest.soil_raw }}{% else %}—{% endif %}</span></div>
             </div>
             <div class="card light">
                 <div class="label">조도</div>
@@ -906,6 +912,25 @@
                 <input id="threshold_soil_moisture_max" form="threshold-form" type="number" step="0.1" inputmode="decimal">
             </div>
         </div>
+        <div class="threshold-range">
+            <div class="threshold-field">
+                <label for="threshold_soil_dry_raw">마른 흙 기준 원시값</label>
+                <input id="threshold_soil_dry_raw" form="threshold-form" type="number" min="0" max="4095" step="1" inputmode="numeric">
+            </div>
+            <div class="threshold-field">
+                <label for="threshold_soil_wet_raw">젖은 흙 기준 원시값</label>
+                <input id="threshold_soil_wet_raw" form="threshold-form" type="number" min="0" max="4095" step="1" inputmode="numeric">
+            </div>
+        </div>
+        <div class="calibration-buttons">
+            <button class="btn btn-ghost" id="use-soil-dry-raw-btn" type="button" onclick="useCurrentSoilRaw('soil_dry_raw')">현재값을 마른 기준으로 사용</button>
+            <button class="btn btn-ghost" id="use-soil-wet-raw-btn" type="button" onclick="useCurrentSoilRaw('soil_wet_raw')">현재값을 젖은 기준으로 사용</button>
+        </div>
+        <div class="calibration-help">
+            흙이 충분히 말랐을 때 마른 기준을 잡으세요.<br>
+            물을 충분히 주고 20~30분 배수한 뒤 젖은 기준을 잡으세요.<br>
+            저장 후 ESP32가 다음 임계값 조회 주기에 적용합니다.
+        </div>
     </div>
 
     <!-- 조도 -->
@@ -993,7 +1018,11 @@ const THRESHOLD_FIELDS = [
     'soil_moisture_max',
     'light_min',
     'light_max',
+    'soil_dry_raw',
+    'soil_wet_raw',
 ];
+
+const SOIL_CALIBRATION_FIELDS = ['soil_dry_raw', 'soil_wet_raw'];
 
 // 최소/최대 쌍을 비교하기 위한 목록이다.
 // 브라우저에서 먼저 잘못된 입력을 잡아주면 서버 왕복 없이 사용자에게 즉시 오류를 보여줄 수 있다.
@@ -1026,6 +1055,32 @@ function setThresholdFormDisabled(disabled) {
     }
     const saveBtn = document.getElementById('threshold-save-btn');
     if (saveBtn) saveBtn.disabled = disabled;
+    updateSoilCalibrationButtons(disabled);
+}
+
+function currentSoilRaw() {
+    const value = _lastSensorData?.soil_raw;
+    const number = Number(value);
+    return value == null || !Number.isInteger(number) ? null : number;
+}
+
+function updateSoilCalibrationButtons(formDisabled = !SELECTED_DEVICE_ID) {
+    const disabled = formDisabled || currentSoilRaw() === null;
+    for (const id of ['use-soil-dry-raw-btn', 'use-soil-wet-raw-btn']) {
+        const button = document.getElementById(id);
+        if (button) button.disabled = disabled;
+    }
+}
+
+function useCurrentSoilRaw(field) {
+    const raw = currentSoilRaw();
+    if (raw === null) {
+        setThresholdMessage('현재 원시값이 없습니다.', 'error');
+        return;
+    }
+    const input = thresholdInput(field);
+    if (input) input.value = raw;
+    setThresholdMessage('현재 원시값을 입력했습니다. 저장 버튼을 눌러 적용하세요.');
 }
 
 function fillThresholdInputs(data) {
@@ -1089,6 +1144,15 @@ function validateThresholdInputs() {
         if (values[minField] != null && values[maxField] != null && values[minField] > values[maxField]) {
             errors.push(`${label} 최소값은 최대값보다 클 수 없습니다.`);
         }
+    }
+
+    for (const field of SOIL_CALIBRATION_FIELDS) {
+        if (values[field] != null && (!Number.isInteger(values[field]) || values[field] < 0 || values[field] > 4095)) {
+            errors.push(`${field} 값은 0~4095 범위의 정수여야 합니다.`);
+        }
+    }
+    if (values.soil_dry_raw != null && values.soil_wet_raw != null && values.soil_dry_raw <= values.soil_wet_raw) {
+        errors.push('마른 흙 기준 원시값은 젖은 흙 기준 원시값보다 커야 합니다.');
     }
 
     return { ok: errors.length === 0, values, errors };
@@ -1695,10 +1759,12 @@ async function refreshLatest() {
         document.getElementById('live-temp').textContent  = d ? val('temperature') : '—';
         document.getElementById('live-hum').textContent   = d ? val('humidity') : '—';
         document.getElementById('live-soil').textContent  = d ? val('soil_moisture') : '—';
+        document.getElementById('live-soil-raw').textContent = d ? val('soil_raw') : '—';
         document.getElementById('live-light').textContent = d ? val('light', 'light_digital') : '—';
         document.getElementById('live-time').textContent  =
             d ? (d.server_received_at ?? d.time ?? d.timestamp ?? '—') : '—';
         _lastSensorData = d;
+        updateSoilCalibrationButtons();
         updateBasilPanel(d);
     } catch (e) {
         console.error('Latest refresh failed:', e);

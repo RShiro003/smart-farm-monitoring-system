@@ -13,6 +13,7 @@ try:
     )
     from services.threshold_service import (
         THRESHOLD_FIELDS,
+        SOIL_CALIBRATION_FIELDS,
         get_or_create_thresholds,
         upsert_thresholds,
     )
@@ -33,6 +34,7 @@ except ModuleNotFoundError:
     )
     from app.services.threshold_service import (
         THRESHOLD_FIELDS,
+        SOIL_CALIBRATION_FIELDS,
         get_or_create_thresholds,
         upsert_thresholds,
     )
@@ -111,6 +113,29 @@ def validate_threshold_payload(payload):
             continue
 
         _store_threshold_number(values, key, value)
+
+    # 토양 보정 필드는 구형 클라이언트 호환을 위해 선택 사항이다.
+    # 전달된 경우에만 갱신하며, 신규 row에는 서비스의 기본값이 적용된다.
+    for key in SOIL_CALIBRATION_FIELDS:
+        if key not in payload:
+            continue
+        value = payload[key]
+        if isinstance(value, bool) or not isinstance(value, int):
+            errors[key] = "must be an integer"
+            continue
+        if not 0 <= value <= 4095:
+            errors[key] = "must be between 0 and 4095"
+            continue
+        values[key] = value
+
+    dry = values.get("soil_dry_raw")
+    wet = values.get("soil_wet_raw")
+    if (dry is None) != (wet is None):
+        missing = "soil_wet_raw" if dry is not None else "soil_dry_raw"
+        errors[missing] = "must be provided with the other soil calibration value"
+    if dry is not None and wet is not None and dry <= wet:
+        errors["soil_dry_raw"] = "must be greater than soil_wet_raw"
+        errors["soil_wet_raw"] = "must be less than soil_dry_raw"
 
     for min_key, max_key in THRESHOLD_PAIRS:
         if min_key in values and max_key in values and values[min_key] > values[max_key]:
