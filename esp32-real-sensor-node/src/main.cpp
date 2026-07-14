@@ -26,19 +26,37 @@ const long gmtOffset_sec = 9 * 3600;
 const int daylightOffset_sec = 0;
 
 // 센서 핀 설정.
-// DHT22는 온도/습도, 토양 센서는 아날로그 원시값과 디지털 상태, 조도 센서는 디지털 상태를 읽는다.
+// DHT22는 온도/습도, SEN0308 방수형 정전식 토양수분 센서는 아날로그 원시값,
+// 조도 센서는 디지털 상태를 읽는다. SEN0308 Signal은 GPIO35에 연결한다.
 #define DHT_PIN 27
 #define DHT_TYPE DHT22
 
 #define LIGHT_DO_PIN 33
 #define SOIL_AO_PIN 35
-#define SOIL_DO_PIN 26
+
+// SEN0308을 실제 마른 흙과 젖은 흙에서 측정한 뒤 아래 두 값을 교체해야 한다.
+// 현재는 기존 변환 동작을 유지하기 위한 ESP32 12비트 ADC 양 끝값이다.
+const int SOIL_DRY_RAW = 4095;
+const int SOIL_WET_RAW = 0;
+const int SOIL_SAMPLE_COUNT = 10;
+const unsigned long SOIL_SAMPLE_INTERVAL_MS = 10;
 
 #define LED_GREEN_PIN 16
 #define LED_RED_PIN 17
 #define LED_WHITE_PIN 18
 
 DHT dht(DHT_PIN, DHT_TYPE);
+
+int readSoilRaw() {
+  long total = 0;
+
+  for (int i = 0; i < SOIL_SAMPLE_COUNT; i++) {
+    total += analogRead(SOIL_AO_PIN);
+    delay(SOIL_SAMPLE_INTERVAL_MS);
+  }
+
+  return total / SOIL_SAMPLE_COUNT;
+}
 
 // 서버에서 내려받는 장치별 임계값 구조체다.
 // evaluateFarmStatus()가 현재 측정값과 이 값을 비교해 LED 상태를 결정한다.
@@ -284,7 +302,9 @@ void setup() {
   dht.begin();
 
   pinMode(LIGHT_DO_PIN, INPUT);
-  pinMode(SOIL_DO_PIN, INPUT);
+  // SEN0308의 최대 아날로그 출력 범위를 읽도록 GPIO35 ADC를 명시적으로 설정한다.
+  analogReadResolution(12);
+  analogSetPinAttenuation(SOIL_AO_PIN, ADC_11db);
   pinMode(LED_GREEN_PIN, OUTPUT);
   pinMode(LED_RED_PIN, OUTPUT);
   pinMode(LED_WHITE_PIN, OUTPUT);
@@ -332,10 +352,9 @@ void loop() {
   float temperature = dht.readTemperature();
   float humidity = dht.readHumidity();
 
-  // 토양 아날로그 원시값은 보정/진단용으로 함께 전송하고,
-  // 디지털 출력은 센서 모듈 자체 임계값 상태를 확인하는 보조값이다.
-  int soilRaw = analogRead(SOIL_AO_PIN);
-  int soilDigital = digitalRead(SOIL_DO_PIN);
+  // SEN0308 방수형 정전식 토양수분 센서의 아날로그 출력을 여러 번 읽어 평균낸다.
+  // 원시값은 현장 보정과 진단을 위해 변환된 수분값과 함께 서버로 전송한다.
+  int soilRaw = readSoilRaw();
   int lightDigital = digitalRead(LIGHT_DO_PIN);
 
   if (isnan(temperature) || isnan(humidity)) {
@@ -345,9 +364,15 @@ void loop() {
   }
 
   // 토양수분 변환.
-  // 일반적으로 soilRaw 값이 클수록 건조, 작을수록 습하므로 4095 -> 0%, 0 -> 100%로 매핑한다.
+  // 현재 보정 상수는 기존 동작을 유지하는 초기값이며, SEN0308 현장 실측 후 반드시 수정해야 한다.
   // 서버에는 사람이 이해하기 쉬운 soil_moisture(%)와 보정용 soil_raw를 같이 보낸다.
-  int soilMoisture = map(soilRaw, 4095, 0, 0, 100);
+  int soilMoisture = map(
+    soilRaw,
+    SOIL_DRY_RAW,
+    SOIL_WET_RAW,
+    0,
+    100
+  );
   soilMoisture = constrain(soilMoisture, 0, 100);
 
   Serial.println("----- SENSOR DATA -----");
@@ -365,9 +390,6 @@ void loop() {
   Serial.print(soilRaw);
   Serial.print(" / Soil moisture: ");
   Serial.println(soilMoisture);
-
-  Serial.print("Soil DO: ");
-  Serial.println(soilDigital);
 
   Serial.print("Light DO: ");
   Serial.println(lightDigital);
@@ -392,7 +414,7 @@ void loop() {
 
     String jsonData = "{";
     // JSON 필드명은 Flask의 validate_sensor_payload()와 sensor_service._COLUMNS 기준에 맞춘다.
-    // 추가 진단값(soil_raw, soil_digital, light_digital)은 DB 컬럼에 존재하므로 함께 저장된다.
+    // soil_raw와 light_digital은 선택 진단값으로 저장되며, 아날로그 전용 SEN0308에는 soil_digital이 없다.
     jsonData += "\"device_id\":\"";
     jsonData += DEVICE_ID;
     jsonData += "\",";
@@ -401,7 +423,6 @@ void loop() {
     jsonData += "\"humidity\":" + String(humidity, 2) + ",";
     jsonData += "\"soil_moisture\":" + String(soilMoisture) + ",";
     jsonData += "\"soil_raw\":" + String(soilRaw) + ",";
-    jsonData += "\"soil_digital\":" + String(soilDigital) + ",";
     jsonData += "\"light\":" + String(lightDigital) + ",";
     jsonData += "\"light_digital\":" + String(lightDigital);
     jsonData += "}";
