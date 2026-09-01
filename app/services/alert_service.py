@@ -11,7 +11,10 @@ except ModuleNotFoundError:
 
 
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DB_FILE = os.path.join(_BASE_DIR, "data", "sensor_data.db")
+DB_FILE = os.environ.get(
+    "SMART_FARM_SENSOR_DB_FILE",
+    os.path.join(_BASE_DIR, "data", "sensor_data.db"),
+)
 
 DEFAULT_COOLDOWN_MINUTES = 10
 
@@ -31,7 +34,7 @@ EVENT_LABELS = {
 
 
 def _connect():
-    os.makedirs(os.path.dirname(DB_FILE), exist_ok=True)
+    os.makedirs(os.path.dirname(os.path.abspath(DB_FILE)), exist_ok=True)
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")

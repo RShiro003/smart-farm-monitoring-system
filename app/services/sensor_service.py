@@ -5,7 +5,10 @@ from datetime import datetime, timedelta
 
 
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DB_FILE      = os.path.join(_BASE_DIR, "data", "sensor_data.db")
+DB_FILE = os.environ.get(
+    "SMART_FARM_SENSOR_DB_FILE",
+    os.path.join(_BASE_DIR, "data", "sensor_data.db"),
+)
 # sensor_data.json은 예전 JSON 저장 방식에서 넘어온 데이터를 한 번 가져오기 위한 레거시 파일이다.
 # 현재 런타임에서 ESP32가 보낸 새 센서값은 JSON 파일이 아니라 위 SQLite DB_FILE에 INSERT된다.
 _JSON_LEGACY = os.path.join(_BASE_DIR, "data", "sensor_data.json")
@@ -58,7 +61,7 @@ def normalize_sensor_record(record):
 def _connect():
     # SQLite 파일이 들어갈 app/data 디렉터리를 보장한다.
     # Raspberry Pi에서 처음 실행하는 경우 DB 파일이 없어도 여기서 디렉터리 생성 후 연결된다.
-    os.makedirs(os.path.dirname(DB_FILE), exist_ok=True)
+    os.makedirs(os.path.dirname(os.path.abspath(DB_FILE)), exist_ok=True)
     conn = sqlite3.connect(DB_FILE)
     # sqlite3.Row를 쓰면 row["temperature"]처럼 컬럼명으로 접근할 수 있어
     # 나중에 _row_to_dict()에서 API 응답용 dict로 바꾸기 쉽다.
@@ -74,11 +77,12 @@ def _insert(conn, record):
     # 들어온 JSON 전체를 통째로 저장하지 않고, _COLUMNS에 정의된 센서 컬럼만 골라 INSERT한다.
     # 예를 들어 extra_debug 같은 키는 API 응답에는 남을 수 있지만 SQLite row에는 들어가지 않는다.
     cols = [c for c in _COLUMNS if c in record]
-    conn.execute(
+    cursor = conn.execute(
         f"INSERT INTO sensor_data ({', '.join(cols)}) "
         f"VALUES ({', '.join('?' * len(cols))})",
         [record[c] for c in cols],
     )
+    return cursor.lastrowid
 
 
 def _row_to_dict(row):
@@ -253,6 +257,19 @@ def _process_alerts_after_save(record):
         process_sensor_alerts(record)
     except Exception as e:
         print(f"[Alert] Sensor alert processing skipped: {e}")
+
+
+def _detect_watering_after_save(record, sensor_row_id):
+    # 관수 판정 오류가 센서 저장 성공 응답을 깨지 않도록 알림과 동일하게 격리한다.
+    try:
+        try:
+            from services.cultivation_service import detect_watering_event
+        except ModuleNotFoundError:
+            from app.services.cultivation_service import detect_watering_event
+
+        detect_watering_event(record, sensor_row_id=sensor_row_id)
+    except Exception as e:
+        print(f"[Watering] Detection skipped: {e}")
 
 def load_sensor_data():
     # 대시보드, 상태 API, /api/sensor GET이 공통으로 사용하는 SELECT 함수다.
@@ -504,9 +521,10 @@ def append_sensor_data(new_record):
     record = normalize_sensor_record(new_record)
     conn = _connect()
     saved = False
+    sensor_row_id = None
     try:
         # INSERT와 commit을 한 함수 안에서 묶어 ESP32 POST 한 건이 DB row 한 건으로 확정되게 한다.
-        _insert(conn, record)
+        sensor_row_id = _insert(conn, record)
         conn.commit()
         saved = True
     except sqlite3.Error:
@@ -516,7 +534,10 @@ def append_sensor_data(new_record):
         conn.close()
 
     if saved:
+        _detect_watering_after_save(record, sensor_row_id)
         _process_alerts_after_save(record)
+
+    return sensor_row_id
 
 
 def filter_sensor_data(data, device_id=None):
