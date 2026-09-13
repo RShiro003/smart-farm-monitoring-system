@@ -300,6 +300,68 @@
             margin-bottom: 14px;
         }
 
+        /* ── Growth and watering ── */
+        .growth-grid {
+            display: grid;
+            grid-template-columns: minmax(260px, 0.8fr) minmax(0, 1.2fr);
+            gap: 14px;
+        }
+
+        .growth-form-card {
+            background: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 12px;
+            padding: 18px 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .growth-form-row {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 10px;
+        }
+
+        .growth-form-card .crop-form-field { min-width: 0; }
+        .growth-form-card .crop-form-input,
+        .growth-form-card .crop-form-textarea {
+            width: 100%;
+            min-width: 0;
+        }
+        .growth-form-card .crop-form-textarea { min-height: 72px; }
+
+        .growth-actions {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .growth-message {
+            min-height: 1rem;
+            color: #64748b;
+            font-size: 0.76rem;
+        }
+
+        .growth-message.ok { color: #4ade80; }
+        .growth-message.error { color: #f87171; }
+
+        .growth-form-card :disabled {
+            cursor: not-allowed;
+            opacity: 0.65;
+        }
+
+        .table-wrap.compact-table-wrap {
+            max-height: 290px;
+            overflow: auto;
+        }
+
+        @media (max-width: 720px) {
+            .growth-grid { grid-template-columns: 1fr; }
+            .growth-form-row { grid-template-columns: 1fr; }
+        }
+
         /* ── Table ── */
         .table-wrap {
             background: #1e293b;
@@ -800,6 +862,82 @@
         </div>
     </section>
 
+    <!-- ── 바질 생육 기록 ── -->
+    <section>
+        <div class="section-header">
+            <div class="section-title">바질 생육 기록</div>
+            <div style="font-size:0.72rem;color:#475569;">
+                장치: <span id="growth-device-label">{% if current_device_id %}{{ current_device_id }}{% else %}장치 선택 필요{% endif %}</span>
+            </div>
+        </div>
+        <div class="growth-grid">
+            <form id="growth-form" class="growth-form-card" onsubmit="submitGrowthRecord(event)">
+                <div class="chart-card-title">새 생육 기록</div>
+                <div class="growth-form-row">
+                    <label class="crop-form-field" for="growth-height">
+                        <span class="crop-form-label">바질 키 (cm)</span>
+                        <input id="growth-height" class="crop-form-input" type="number" min="0" step="0.1" inputmode="decimal" placeholder="예: 13.5">
+                    </label>
+                    <label class="crop-form-field" for="growth-leaf-count">
+                        <span class="crop-form-label">잎 개수</span>
+                        <input id="growth-leaf-count" class="crop-form-input" type="number" min="0" step="1" inputmode="numeric" placeholder="예: 12">
+                    </label>
+                </div>
+                <label class="crop-form-field" for="growth-note">
+                    <span class="crop-form-label">메모</span>
+                    <textarea id="growth-note" class="crop-form-textarea" maxlength="500" placeholder="예: 새 잎 확인"></textarea>
+                </label>
+                <div class="growth-actions">
+                    <button id="growth-submit" class="btn btn-primary" type="submit">생육 기록 저장</button>
+                    <span id="growth-message" class="growth-message"></span>
+                </div>
+            </form>
+            <div class="chart-card">
+                <div class="chart-card-title">바질 키 변화 (cm)</div>
+                <canvas id="growthChart"></canvas>
+            </div>
+        </div>
+        <div class="table-wrap compact-table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>기록 시각</th>
+                        <th>바질 키</th>
+                        <th>잎 개수</th>
+                        <th>메모</th>
+                    </tr>
+                </thead>
+                <tbody id="growth-tbody">
+                    <tr><td colspan="4" style="text-align:center;color:#475569;padding:28px;">불러오는 중…</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <!-- ── 자동 관수 감지 ── -->
+    <section>
+        <div class="section-header">
+            <div class="section-title">최근 자동 관수 감지</div>
+            <div style="font-size:0.72rem;color:#475569;">토양수분 급상승을 서버에서 자동 분석</div>
+        </div>
+        <div class="table-wrap compact-table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>감지 시각</th>
+                        <th>감지 전</th>
+                        <th>감지 후</th>
+                        <th>증가량</th>
+                        <th>신뢰도</th>
+                    </tr>
+                </thead>
+                <tbody id="watering-tbody">
+                    <tr><td colspan="5" style="text-align:center;color:#475569;padding:28px;">불러오는 중…</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+
     <!-- ── 전체 기록 ── -->
     <section>
         <div class="section-header">
@@ -998,7 +1136,11 @@ async function fetchJson(key, url) {
 
     try {
         const res = await fetch(url, { signal: controller.signal });
-        return await res.json();
+        const data = await res.json();
+        if (!res.ok) {
+            throw new Error(data?.error || `Request failed (${res.status})`);
+        }
+        return data;
     } catch (e) {
         if (e.name === 'AbortError') return undefined;
         throw e;
@@ -1472,6 +1614,20 @@ const charts = {
     light: makeChart('lightChart', '#facc15', {}),
 };
 
+// 생육 차트도 페이지 수명 동안 한 번만 만들고 loadGrowth()에서 데이터만 교체한다.
+const growthChart = makeChart('growthChart', '#a78bfa', {});
+growthChart.data.datasets[0].label = '바질 키 (cm)';
+growthChart.options.scales.x.title = {
+    display: true,
+    text: '날짜',
+    color: '#64748b',
+};
+growthChart.options.scales.y.title = {
+    display: true,
+    text: '바질 키 (cm)',
+    color: '#64748b',
+};
+
 // 서버 응답 필드명과 Chart.js 인스턴스 이름을 연결한다.
 // loadCharts()가 이 목록을 순회하며 네 개 그래프를 같은 방식으로 갱신한다.
 const CHART_KEYS = [
@@ -1480,6 +1636,181 @@ const CHART_KEYS = [
     ['soil',  'soil_moisture'],
     ['light', 'light'],
 ];
+
+let growthSaving = false;
+
+function setGrowthMessage(text, kind = '') {
+    const message = document.getElementById('growth-message');
+    message.textContent = text;
+    message.className = `growth-message${kind ? ` ${kind}` : ''}`;
+}
+
+function setGrowthFormDisabled(disabled) {
+    document.querySelectorAll('#growth-form input, #growth-form textarea, #growth-form button')
+        .forEach(element => { element.disabled = disabled; });
+}
+
+function renderEmptyTable(tbodyId, colspan, message) {
+    const tbody = document.getElementById(tbodyId);
+    const row = document.createElement('tr');
+    const cell = document.createElement('td');
+    cell.colSpan = colspan;
+    cell.style.cssText = 'text-align:center;color:#475569;padding:28px;';
+    cell.textContent = message;
+    row.appendChild(cell);
+    tbody.replaceChildren(row);
+}
+
+function appendTextCell(row, text, className = '') {
+    const cell = document.createElement('td');
+    cell.textContent = text;
+    if (className) cell.className = className;
+    row.appendChild(cell);
+}
+
+function renderGrowthRecords(records) {
+    const tbody = document.getElementById('growth-tbody');
+    if (!records.length) {
+        renderEmptyTable('growth-tbody', 4, '등록된 생육 기록이 없습니다.');
+        return;
+    }
+
+    const fragment = document.createDocumentFragment();
+    for (const record of [...records].reverse().slice(0, 20)) {
+        const row = document.createElement('tr');
+        appendTextCell(row, record.recorded_at ?? '—');
+        appendTextCell(
+            row,
+            record.height_cm == null ? '—' : `${record.height_cm} cm`,
+            'soil-val',
+        );
+        appendTextCell(
+            row,
+            record.leaf_count == null ? '—' : `잎 ${record.leaf_count}개`,
+        );
+        appendTextCell(row, record.note ?? '—');
+        fragment.appendChild(row);
+    }
+    tbody.replaceChildren(fragment);
+}
+
+function updateGrowthChart(records) {
+    const measured = records.filter(record => Number.isFinite(Number(record.height_cm)));
+    growthChart.data.labels = measured.map(record => (record.recorded_at ?? '').slice(0, 10));
+    growthChart.data.datasets[0].data = measured.map(record => Number(record.height_cm));
+    growthChart.update('active');
+}
+
+async function loadGrowth() {
+    if (!SELECTED_DEVICE_ID) {
+        setGrowthFormDisabled(true);
+        setGrowthMessage('상단에서 기록할 장치를 선택하세요.');
+        renderEmptyTable('growth-tbody', 4, '장치를 선택하면 생육 기록을 볼 수 있습니다.');
+        updateGrowthChart([]);
+        return;
+    }
+
+    setGrowthFormDisabled(growthSaving);
+    try {
+        const records = await fetchJson('growth', apiUrl('/api/growth'));
+        if (records === undefined) return;
+        const safeRecords = Array.isArray(records) ? records : [];
+        renderGrowthRecords(safeRecords);
+        updateGrowthChart(safeRecords);
+    } catch (error) {
+        console.error('Growth records load failed:', error);
+        renderEmptyTable('growth-tbody', 4, '생육 기록을 불러오지 못했습니다.');
+    }
+}
+
+async function submitGrowthRecord(event) {
+    event.preventDefault();
+    if (!SELECTED_DEVICE_ID) {
+        setGrowthMessage('먼저 장치를 선택하세요.', 'error');
+        return;
+    }
+    if (growthSaving) return;
+
+    const heightRaw = document.getElementById('growth-height').value.trim();
+    const leafRaw = document.getElementById('growth-leaf-count').value.trim();
+    const note = document.getElementById('growth-note').value.trim();
+    const payload = { device_id: SELECTED_DEVICE_ID, note };
+
+    if (heightRaw) {
+        const height = Number(heightRaw);
+        if (!Number.isFinite(height) || height < 0) {
+            setGrowthMessage('바질 키는 0 이상의 숫자여야 합니다.', 'error');
+            return;
+        }
+        payload.height_cm = height;
+    }
+    if (leafRaw) {
+        const leafCount = Number(leafRaw);
+        if (!Number.isInteger(leafCount) || leafCount < 0) {
+            setGrowthMessage('잎 개수는 0 이상의 정수여야 합니다.', 'error');
+            return;
+        }
+        payload.leaf_count = leafCount;
+    }
+
+    growthSaving = true;
+    setGrowthFormDisabled(true);
+    setGrowthMessage('저장 중…');
+    try {
+        const response = await fetch('/api/growth', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || '생육 기록 저장 실패');
+
+        document.getElementById('growth-form').reset();
+        setGrowthMessage('저장했습니다.', 'ok');
+        await loadGrowth();
+    } catch (error) {
+        setGrowthMessage(error.message || '생육 기록 저장에 실패했습니다.', 'error');
+    } finally {
+        growthSaving = false;
+        setGrowthFormDisabled(false);
+    }
+}
+
+function renderWateringEvents(events) {
+    const tbody = document.getElementById('watering-tbody');
+    if (!events.length) {
+        renderEmptyTable('watering-tbody', 5, '자동 감지된 관수 이벤트가 없습니다.');
+        return;
+    }
+
+    const fragment = document.createDocumentFragment();
+    for (const event of events.slice(0, 20)) {
+        const row = document.createElement('tr');
+        appendTextCell(row, event.detected_at ?? '—');
+        appendTextCell(row, `${event.moisture_before ?? '—'}%`, 'soil-val');
+        appendTextCell(row, `${event.moisture_after ?? '—'}%`, 'soil-val');
+        appendTextCell(row, `+${event.increase_amount ?? '—'}%p`, 'soil-val');
+        const confidence = Number(event.confidence);
+        appendTextCell(row, Number.isFinite(confidence) ? `${Math.round(confidence * 100)}%` : '—');
+        fragment.appendChild(row);
+    }
+    tbody.replaceChildren(fragment);
+}
+
+async function loadWateringEvents() {
+    if (!SELECTED_DEVICE_ID) {
+        renderEmptyTable('watering-tbody', 5, '장치를 선택하면 자동 관수 감지를 볼 수 있습니다.');
+        return;
+    }
+    try {
+        const events = await fetchJson('watering', apiUrl('/api/watering', { limit: 20 }));
+        if (events === undefined) return;
+        renderWateringEvents(Array.isArray(events) ? events : []);
+    } catch (error) {
+        console.error('Watering events load failed:', error);
+        renderEmptyTable('watering-tbody', 5, '관수 이벤트를 불러오지 못했습니다.');
+    }
+}
 
 // ── Crop profile functions ────────────────────────────────
 
@@ -2011,6 +2342,7 @@ async function refreshOnSensorChange() {
         refreshLatest(),
         loadAverages(currentAvgPeriod),
         loadCharts(currentChartPeriod),
+        loadWateringEvents(),
         refreshDeviceOptions(),
     ];
     if (historyPage === 1) tasks.push(loadHistory(1));
@@ -2044,6 +2376,7 @@ const REFRESH_MS = {
     chart: 20000,
     averages: 30000,
     history: 30000,
+    watering: 15000,
 };
 
 // ── Init ─────────────────────────────────────────────────
@@ -2056,6 +2389,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     refreshLatest();
     loadAverages(currentAvgPeriod);
     loadCharts(currentChartPeriod);
+    loadGrowth();
+    loadWateringEvents();
     loadHistory(1);
     refreshDeviceOptions();
     pollSensorChanges();
@@ -2065,6 +2400,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     setInterval(() => loadCharts(currentChartPeriod), REFRESH_MS.chart);
     setInterval(() => loadAverages(currentAvgPeriod), REFRESH_MS.averages);
     setInterval(refreshVisibleHistory, REFRESH_MS.history);
+    setInterval(loadWateringEvents, REFRESH_MS.watering);
 });
 </script>
 

@@ -2,12 +2,14 @@ from flask import Flask, jsonify, request, redirect
 
 # 이 파일은 Flask 애플리케이션의 진입점이다.
 # 센서 수집 API는 app/routes/sensor.py의 Blueprint가 담당하고,
-# 대시보드 화면/조회 API는 app/routes/dashboard.py의 Blueprint가 담당한다.
-# main.py에는 앱 생성, Blueprint 등록, 공통 상태 확인, 임계값 저장 API만 남겨
+# 대시보드 화면/조회 API는 app/routes/dashboard.py,
+# 생육/관수/분석 API는 app/routes/cultivation.py의 Blueprint가 담당한다.
+# main.py에는 앱 생성, Blueprint 등록과 기존 공통 설정 API만 남겨
 # "어떤 라우트가 어디에 있는지"를 명확히 분리한다.
 try:
     from routes.dashboard import dashboard_bp
     from routes.sensor import sensor_bp
+    from routes.cultivation import cultivation_bp
     from services.sensor_service import (
         get_latest_sensor_record,
     )
@@ -29,6 +31,7 @@ try:
 except ModuleNotFoundError:
     from app.routes.dashboard import dashboard_bp
     from app.routes.sensor import sensor_bp
+    from app.routes.cultivation import cultivation_bp
     from app.services.sensor_service import (
         get_latest_sensor_record,
     )
@@ -53,6 +56,8 @@ app = Flask(__name__)
 app.register_blueprint(dashboard_bp)
 # /api/sensor GET/POST 라우트 등록
 app.register_blueprint(sensor_bp)
+# /api/growth, /api/watering, /api/analysis/daily 라우트 등록
+app.register_blueprint(cultivation_bp)
 
 # 임계값은 최소/최대가 한 쌍으로 들어온다.
 # 저장 전 검증 단계에서 최소값이 최대값보다 큰 잘못된 설정을 막기 위해
