@@ -1,6 +1,7 @@
 import math
 import os
 import sqlite3
+from collections import deque
 from datetime import datetime, timedelta
 from statistics import median
 
@@ -406,6 +407,61 @@ def _recent_watering_samples(conn, device_id, received_at, sensor_row_id=None):
     return [dict(row) for row in reversed(rows)]
 
 
+def _update_watering_event(conn, latest, event):
+    """같은 관수의 후속 샘플로 수분 상승량과 신뢰도를 보강한다."""
+    moisture_before = float(latest["moisture_before"])
+    moisture_after = max(
+        float(latest["moisture_after"]),
+        float(event["moisture_after"]),
+    )
+    increase_amount = round(moisture_after - moisture_before, 2)
+    confidence = max(
+        float(latest["confidence"] or 0),
+        float(event["confidence"]),
+        _watering_confidence(increase_amount, WATERING_POST_SAMPLE_COUNT),
+    )
+    if (
+        moisture_after > float(latest["moisture_after"])
+        or increase_amount > float(latest["increase_amount"])
+        or confidence > float(latest["confidence"] or 0)
+    ):
+        conn.execute(
+            """
+            UPDATE watering_events
+            SET moisture_after = ?, increase_amount = ?, confidence = ?
+            WHERE id = ?
+            """,
+            (
+                round(moisture_after, 2),
+                increase_amount,
+                round(min(1.0, confidence), 2),
+                latest["id"],
+            ),
+        )
+        return True
+    return False
+
+
+def _insert_watering_event(conn, device_id, event):
+    return conn.execute(
+        """
+        INSERT INTO watering_events (
+            device_id, detected_at, moisture_before, moisture_after,
+            increase_amount, confidence, detection_method
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            device_id,
+            event["detected_at"],
+            event["moisture_before"],
+            event["moisture_after"],
+            event["increase_amount"],
+            event["confidence"],
+            event["detection_method"],
+        ),
+    ).lastrowid
+
+
 def detect_watering_event(record, sensor_row_id=None):
     device_id = record.get("device_id")
     received_at = record.get("server_received_at")
@@ -444,42 +500,7 @@ def detect_watering_event(record, sensor_row_id=None):
                     return None
                 if since_last < WATERING_COOLDOWN_SECONDS:
                     if since_last <= WATERING_EVENT_UPDATE_SECONDS:
-                        moisture_before = float(latest["moisture_before"])
-                        moisture_after = max(
-                            float(latest["moisture_after"]),
-                            float(event["moisture_after"]),
-                        )
-                        increase_amount = round(
-                            moisture_after - moisture_before,
-                            2,
-                        )
-                        confidence = max(
-                            float(latest["confidence"] or 0),
-                            float(event["confidence"]),
-                            _watering_confidence(
-                                increase_amount,
-                                WATERING_POST_SAMPLE_COUNT,
-                            ),
-                        )
-                        if (
-                            moisture_after > float(latest["moisture_after"])
-                            or increase_amount > float(latest["increase_amount"])
-                            or confidence > float(latest["confidence"] or 0)
-                        ):
-                            conn.execute(
-                                """
-                                UPDATE watering_events
-                                SET moisture_after = ?, increase_amount = ?,
-                                    confidence = ?
-                                WHERE id = ?
-                                """,
-                                (
-                                    round(moisture_after, 2),
-                                    increase_amount,
-                                    round(min(1.0, confidence), 2),
-                                    latest["id"],
-                                ),
-                            )
+                        if _update_watering_event(conn, latest, event):
                             conn.commit()
                             updated = conn.execute(
                                 "SELECT * FROM watering_events WHERE id = ?",
@@ -490,23 +511,7 @@ def detect_watering_event(record, sensor_row_id=None):
                     return None
 
         try:
-            conn.execute(
-                """
-                INSERT INTO watering_events (
-                    device_id, detected_at, moisture_before, moisture_after,
-                    increase_amount, confidence, detection_method
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    device_id,
-                    event["detected_at"],
-                    event["moisture_before"],
-                    event["moisture_after"],
-                    event["increase_amount"],
-                    event["confidence"],
-                    event["detection_method"],
-                ),
-            )
+            _insert_watering_event(conn, device_id, event)
         except sqlite3.IntegrityError:
             conn.rollback()
             return None
@@ -517,6 +522,128 @@ def detect_watering_event(record, sensor_row_id=None):
         raise
     finally:
         conn.close()
+
+
+def _store_backfilled_watering_event(conn, device_id, event):
+    event_at = _parse_datetime(event["detected_at"])
+    cooldown = timedelta(seconds=WATERING_COOLDOWN_SECONDS)
+    # 판정 중에는 쓰기 잠금을 잡지 않고, 중복 확인과 저장만 직렬화한다.
+    # 별도 reader 연결의 스냅샷과 달리 실시간/다른 backfill의 저장도 확인한다.
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        previous = conn.execute(
+            """
+            SELECT * FROM watering_events
+            WHERE device_id = ? AND detected_at <= ? AND detected_at > ?
+            ORDER BY detected_at DESC, id DESC
+            LIMIT 1
+            """,
+            (
+                device_id,
+                event["detected_at"],
+                (event_at - cooldown).strftime("%Y-%m-%d %H:%M:%S"),
+            ),
+        ).fetchone()
+        if previous is not None:
+            since_last = (
+                event_at - _parse_datetime(previous["detected_at"])
+            ).total_seconds()
+            if since_last <= WATERING_EVENT_UPDATE_SECONDS:
+                _update_watering_event(conn, previous, event)
+            return previous["id"], False
+
+        # 과거 시점의 후보는 이미 저장된 이후 이벤트와도 겹칠 수 있다.
+        following = conn.execute(
+            """
+            SELECT id FROM watering_events
+            WHERE device_id = ? AND detected_at > ? AND detected_at < ?
+            ORDER BY detected_at ASC, id ASC
+            LIMIT 1
+            """,
+            (
+                device_id,
+                event["detected_at"],
+                (event_at + cooldown).strftime("%Y-%m-%d %H:%M:%S"),
+            ),
+        ).fetchone()
+        if following is not None:
+            return following["id"], False
+
+        return _insert_watering_event(conn, device_id, event), True
+
+
+def backfill_watering_events(device_id=None):
+    """저장된 센서 기록을 순차 재생한다. 서버 초기화에서는 호출하지 않는다.
+
+    scanned_samples는 읽은 센서 행 수(판정 불가능한 행 포함), created_events는
+    새 이벤트 수, existing_events는 중복/cooldown으로 매칭된 기존 이벤트의
+    고유 개수다. 이번 실행에서 생성한 이벤트의 후속 판정은 중복 집계하지 않는다.
+    """
+    if device_id is not None:
+        if not isinstance(device_id, str) or not device_id.strip():
+            raise ValueError("device_id must be a non-empty string")
+        device_id = device_id.strip()
+
+    result = {"scanned_samples": 0, "created_events": 0, "existing_events": 0}
+    reader = _connect()
+    writer = None
+    try:
+        writer = _connect()
+        clauses = ["device_id IS NOT NULL", "TRIM(device_id) != ''"]
+        params = []
+        if device_id is not None:
+            clauses.append("device_id = ?")
+            params.append(device_id)
+        rows = reader.execute(
+            f"""
+            SELECT id, device_id, server_received_at, soil_moisture, soil_raw
+            FROM sensor_data
+            WHERE {' AND '.join(clauses)}
+            ORDER BY device_id ASC, server_received_at ASC, id ASC
+            """,
+            params,
+        )
+        current_device = None
+        samples = deque(maxlen=WATERING_QUERY_LIMIT)
+        created_ids = set()
+        existing_ids = set()
+        for row in rows:
+            result["scanned_samples"] += 1
+            if row["device_id"] != current_device:
+                current_device = row["device_id"]
+                samples.clear()
+                created_ids.clear()
+                existing_ids.clear()
+            received_at = _parse_datetime(row["server_received_at"])
+            if received_at is None:
+                continue
+            cutoff = received_at - timedelta(
+                seconds=WATERING_DETECTION_WINDOW_SECONDS
+            )
+            while samples and samples[0][0] < cutoff:
+                samples.popleft()
+            # 실시간 SELECT처럼 NULL 수분은 query limit을 차지하지 않는다.
+            if row["soil_moisture"] is not None:
+                samples.append((received_at, dict(row)))
+            event = evaluate_watering_samples([
+                sample for at, sample in samples if cutoff <= at <= received_at
+            ])
+            if event is None:
+                continue
+            event_id, created = _store_backfilled_watering_event(
+                writer, current_device, event
+            )
+            if created:
+                created_ids.add(event_id)
+                result["created_events"] += 1
+            elif event_id not in created_ids and event_id not in existing_ids:
+                existing_ids.add(event_id)
+                result["existing_events"] += 1
+        return result
+    finally:
+        reader.close()
+        if writer is not None:
+            writer.close()
 
 
 def list_watering_events(device_id, limit=100):
