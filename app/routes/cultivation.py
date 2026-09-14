@@ -5,6 +5,7 @@ from flask import Blueprint, jsonify, request
 
 try:
     from services.cultivation_service import (
+        backfill_watering_events,
         create_growth_record,
         format_recorded_at,
         get_daily_analysis,
@@ -13,6 +14,7 @@ try:
     )
 except ModuleNotFoundError:
     from app.services.cultivation_service import (
+        backfill_watering_events,
         create_growth_record,
         format_recorded_at,
         get_daily_analysis,
@@ -140,6 +142,16 @@ def get_watering_events():
     if device_id is None:
         return jsonify({"error": "device_id is required"}), 400
     return jsonify(list_watering_events(device_id, request.args.get("limit", 100)))
+
+
+@cultivation_bp.route("/api/watering/backfill", methods=["POST"])
+def post_watering_backfill():
+    device_id = None
+    if "device_id" in request.args:
+        device_id = _required_device_id(request.args.get("device_id"))
+        if device_id is None:
+            return jsonify({"error": "device_id must not be empty"}), 400
+    return jsonify(backfill_watering_events(device_id))
 
 
 @cultivation_bp.route("/api/analysis/daily", methods=["GET"])

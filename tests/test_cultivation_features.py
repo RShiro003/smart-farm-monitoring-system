@@ -8,6 +8,7 @@ import warnings
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
+from threading import Barrier
 from unittest import mock
 
 
@@ -128,6 +129,34 @@ class CultivationFeatureTests(unittest.TestCase):
 
     def _events(self, device_id):
         return cultivation_service.list_watering_events(device_id)
+
+    def _store_historical_samples(self, device_id, samples):
+        conn = sqlite3.connect(_SENSOR_DB)
+        try:
+            ids = []
+            for received_at, moisture in samples:
+                if isinstance(received_at, datetime):
+                    received_at = received_at.strftime("%Y-%m-%d %H:%M:%S")
+                cursor = conn.execute(
+                    """
+                    INSERT INTO sensor_data (
+                        device_id, server_received_at, soil_moisture
+                    ) VALUES (?, ?, ?)
+                    """,
+                    (device_id, received_at, moisture),
+                )
+                ids.append(cursor.lastrowid)
+            conn.commit()
+            return ids
+        finally:
+            conn.close()
+
+    def _sensor_snapshot(self):
+        conn = sqlite3.connect(_SENSOR_DB)
+        try:
+            return conn.execute("SELECT * FROM sensor_data ORDER BY id").fetchall()
+        finally:
+            conn.close()
 
     def test_normal_watering_creates_one_event(self):
         self._append_sequence("esp32_01", [42, 43, 44, 52, 58, 62, 64])
@@ -267,6 +296,282 @@ class CultivationFeatureTests(unittest.TestCase):
 
         self.assertEqual(sum(result is not None for result in results), 1)
         self.assertEqual(len(self._events("concurrent")), 1)
+
+    def test_backfill_matches_live_detection_and_is_idempotent(self):
+        start = datetime(2026, 8, 13, 8, 0, 0)
+        for offset, values in (
+            (0, [42, 43, 44, 52, 58, 62, 64]),
+            (10, [35, 36, 45, 53, 57]),
+            (120, [35, 36, 45, 53, 57]),
+        ):
+            self._append_sequence(
+                "history", values, start + timedelta(minutes=offset)
+            )
+        live_events = self._events("history")
+        self.assertEqual(len(live_events), 2)
+        original_samples = self._sensor_snapshot()
+        conn = sqlite3.connect(_SENSOR_DB)
+        try:
+            conn.execute("DELETE FROM watering_events")
+            conn.commit()
+        finally:
+            conn.close()
+
+        first = cultivation_service.backfill_watering_events("history")
+        self.assertEqual(first, {
+            "scanned_samples": 17, "created_events": 2, "existing_events": 0,
+        })
+        self.assertEqual(self._events("history"), live_events)
+        second = cultivation_service.backfill_watering_events("history")
+        self.assertEqual(second, {
+            "scanned_samples": 17, "created_events": 0, "existing_events": 2,
+        })
+        self.assertEqual(self._events("history"), live_events)
+        self.assertEqual(self._sensor_snapshot(), original_samples)
+
+    def test_backfill_restores_old_events_despite_newer_live_event(self):
+        start = datetime(2026, 8, 13, 8, 0, 0)
+        self._append_sequence(
+            "history", [40, 40, 50, 55, 58], start + timedelta(hours=2)
+        )
+        recent_event = self._events("history")[0]
+        self._store_historical_samples("history", [
+            (start + timedelta(seconds=index * 5), moisture)
+            for index, moisture in enumerate([40, 40, 50, 55, 58])
+        ])
+
+        result = cultivation_service.backfill_watering_events("history")
+
+        self.assertEqual(result, {
+            "scanned_samples": 10, "created_events": 1, "existing_events": 1,
+        })
+        events = self._events("history")
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[0], recent_event)
+        self.assertEqual(events[1]["detected_at"], "2026-08-13 08:00:10")
+
+    def test_concurrent_backfills_and_live_detection_create_one_event(self):
+        start = datetime(2026, 8, 13, 9, 0, 0)
+        ids = self._store_historical_samples("concurrent", [
+            (start + timedelta(seconds=index * 5), moisture)
+            for index, moisture in enumerate([40, 40, 50, 55, 58])
+        ])
+        original_samples = self._sensor_snapshot()
+        barrier = Barrier(8)
+
+        def detect(index):
+            barrier.wait(timeout=10)
+            if index % 2 == 0:
+                return cultivation_service.backfill_watering_events("concurrent")
+            cultivation_service.detect_watering_event({
+                "device_id": "concurrent",
+                "server_received_at": "2026-08-13 09:00:20",
+            }, sensor_row_id=ids[-1])
+            return None
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            results = list(executor.map(detect, range(8)))
+
+        backfills = [result for result in results if result is not None]
+        self.assertLessEqual(sum(result["created_events"] for result in backfills), 1)
+        for result in backfills:
+            self.assertEqual(result["scanned_samples"], 5)
+            self.assertEqual(result["created_events"] + result["existing_events"], 1)
+        events = self._events("concurrent")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["detected_at"], "2026-08-13 09:00:10")
+        self.assertEqual(self._sensor_snapshot(), original_samples)
+
+    def test_backfill_checks_both_cooldown_neighbors_and_exact_boundary(self):
+        at = datetime(2026, 8, 13, 9, 0, 0)
+        cooldown = cultivation_service.WATERING_COOLDOWN_SECONDS
+        update_window = cultivation_service.WATERING_EVENT_UPDATE_SECONDS
+        candidate = {
+            "detected_at": at.strftime("%Y-%m-%d %H:%M:%S"),
+            "moisture_before": 40.0,
+            "moisture_after": 70.0,
+            "increase_amount": 30.0,
+            "confidence": 1.0,
+            "detection_method": "soil_moisture_jump",
+        }
+        cases = (
+            ([-cooldown], 1, 0, 55),
+            ([cooldown], 1, 0, 55),
+            ([-cooldown + 1], 0, 1, 55),
+            ([cooldown - 1], 0, 1, 55),
+            ([-cooldown, cooldown - 1], 0, 1, 55),
+            ([-cooldown + 1, cooldown], 0, 1, 55),
+            ([-update_window], 0, 1, 70),
+            ([-update_window - 1], 0, 1, 55),
+            ([1], 0, 1, 55),
+        )
+        for index, (offsets, created, existing, moisture_after) in enumerate(cases):
+            with self.subTest(offsets=offsets):
+                device = f"boundary_{index}"
+                self._store_historical_samples(device, [(at, 55)])
+                conn = sqlite3.connect(_SENSOR_DB)
+                try:
+                    for offset in offsets:
+                        conn.execute(
+                            """
+                            INSERT INTO watering_events (
+                                device_id, detected_at, moisture_before,
+                                moisture_after, increase_amount, confidence,
+                                detection_method
+                            ) VALUES (?, ?, 40, 55, 15, 0.9, 'soil_moisture_jump')
+                            """,
+                            (device, (at + timedelta(seconds=offset)).strftime(
+                                "%Y-%m-%d %H:%M:%S"
+                            )),
+                        )
+                    conn.commit()
+                finally:
+                    conn.close()
+                with mock.patch.object(
+                    cultivation_service, "evaluate_watering_samples",
+                    return_value=candidate,
+                ):
+                    result = cultivation_service.backfill_watering_events(device)
+                self.assertEqual(result, {
+                    "scanned_samples": 1,
+                    "created_events": created,
+                    "existing_events": existing,
+                })
+                events = self._events(device)
+                self.assertEqual(len(events), len(offsets) + created)
+                for event in events:
+                    if event["detected_at"] != candidate["detected_at"]:
+                        self.assertEqual(event["moisture_after"], moisture_after)
+
+    def test_backfill_replays_timestamp_then_id_with_bounded_recent_samples(self):
+        start = datetime(2026, 8, 13, 9, 0, 0)
+        ids = self._store_historical_samples("history", [
+            (start + timedelta(seconds=offset), moisture)
+            for offset, moisture in (
+                (30, 45), (0, 40), (5, 41), (5, 42), (10, None), (200, 50)
+            )
+        ])
+        observed = []
+
+        def inspect_samples(samples):
+            observed.append([sample["id"] for sample in samples])
+            return None
+
+        with mock.patch.multiple(
+            cultivation_service,
+            WATERING_DETECTION_WINDOW_SECONDS=25,
+            WATERING_QUERY_LIMIT=2,
+        ), mock.patch.object(
+            cultivation_service, "evaluate_watering_samples",
+            side_effect=inspect_samples,
+        ):
+            result = cultivation_service.backfill_watering_events("history")
+
+        self.assertEqual(observed, [
+            [ids[1]], [ids[1], ids[2]], [ids[2], ids[3]],
+            [ids[2], ids[3]], [ids[3], ids[0]], [ids[5]],
+        ])
+        self.assertEqual(result, {
+            "scanned_samples": 6, "created_events": 0, "existing_events": 0,
+        })
+
+    def test_backfill_skips_invalid_samples_and_preserves_source_rows(self):
+        start = datetime(2026, 8, 13, 9, 0, 0)
+        self._store_historical_samples("history", [
+            (None, 90), ("not-a-time", 90), ("", 90),
+            (start - timedelta(seconds=10), None),
+            (start - timedelta(seconds=5), "invalid"),
+            *[(start + timedelta(seconds=index * 5), moisture)
+              for index, moisture in enumerate([40, 40, 50, 55, 58])],
+        ])
+        original_samples = self._sensor_snapshot()
+
+        result = cultivation_service.backfill_watering_events("history")
+
+        self.assertEqual(result, {
+            "scanned_samples": 10, "created_events": 1, "existing_events": 0,
+        })
+        self.assertEqual(self._sensor_snapshot(), original_samples)
+        self.assertEqual(self._events("history")[0]["moisture_after"], 55.0)
+
+    def test_backfill_reuses_live_rejections_and_raw_sensor_validation(self):
+        sequences = (
+            ("spike", [50, 51, 77, 51, 50], None),
+            ("gradual", [50, 51, 52, 53, 54], None),
+            ("calibration", [40, 40, 50, 55, 58], [2400] * 5),
+            ("watering", [40, 40, 50, 55, 58], [2500, 2490, 2400, 2350, 2300]),
+        )
+        with mock.patch.object(cultivation_service, "detect_watering_event"):
+            for device, values, raw_values in sequences:
+                self._append_sequence(device, values, raw_values=raw_values)
+
+        result = cultivation_service.backfill_watering_events()
+
+        self.assertEqual(result, {
+            "scanned_samples": 20, "created_events": 1, "existing_events": 0,
+        })
+        for device, _, _ in sequences:
+            self.assertEqual(len(self._events(device)), int(device == "watering"))
+
+    def test_backfill_api_selects_devices_and_existing_watering_api_sees_events(self):
+        start = datetime(2026, 8, 13, 9, 0, 0)
+        for device in ("esp32_a", "esp32_b", "legacy", "", "   "):
+            self._store_historical_samples(device, [
+                (start + timedelta(seconds=index * 5), moisture)
+                for index, moisture in enumerate([40, 40, 50, 55, 58])
+            ])
+
+        response = self.client.post("/api/watering/backfill?device_id=esp32_a")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), {
+            "scanned_samples": 5, "created_events": 1, "existing_events": 0,
+        })
+        self.assertEqual(self._events("esp32_b"), [])
+        events = self.client.get("/api/watering?device_id=esp32_a").get_json()
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["detected_at"], "2026-08-13 09:00:10")
+        dashboard = self.client.get("/dashboard?device_id=esp32_a")
+        self.assertEqual(dashboard.status_code, 200)
+        self.assertIn('id="watering-tbody"', dashboard.get_data(as_text=True))
+
+        response = self.client.post("/api/watering/backfill")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), {
+            "scanned_samples": 15, "created_events": 2, "existing_events": 1,
+        })
+        self.assertEqual(len(self._events("esp32_b")), 1)
+        self.assertEqual(len(self._events("legacy")), 1)
+        self.assertEqual(self._events(""), [])
+        self.assertEqual(self._events("   "), [])
+
+    def test_backfill_api_validates_device_and_handles_no_history(self):
+        for query in ("device_id=", "device_id=%20%20"):
+            self.assertEqual(
+                self.client.post(f"/api/watering/backfill?{query}").status_code, 400
+            )
+        self.assertEqual(self.client.get("/api/watering/backfill").status_code, 405)
+        for query in ("", "?device_id=missing"):
+            response = self.client.post(f"/api/watering/backfill{query}")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.get_json(), {
+                "scanned_samples": 0, "created_events": 0, "existing_events": 0,
+            })
+
+    def test_schema_initialization_does_not_backfill_historical_samples(self):
+        start = datetime(2026, 8, 13, 9, 0, 0)
+        self._store_historical_samples("history", [
+            (start + timedelta(seconds=index * 5), moisture)
+            for index, moisture in enumerate([40, 40, 50, 55, 58])
+        ])
+
+        with mock.patch.object(
+            cultivation_service, "evaluate_watering_samples"
+        ) as evaluate:
+            cultivation_service.initialize_database()
+            cultivation_service.initialize_database()
+
+        evaluate.assert_not_called()
+        self.assertEqual(self._events("history"), [])
 
     def test_growth_api_validates_sorts_and_filters_by_device(self):
         invalid = self.client.post("/api/growth", json={
