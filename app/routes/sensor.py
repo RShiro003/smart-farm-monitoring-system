@@ -1,4 +1,6 @@
 from datetime import datetime
+import math
+import re
 from time import perf_counter
 
 from flask import Blueprint, jsonify, request
@@ -8,15 +10,23 @@ from flask import Blueprint, jsonify, request
 # ESP32가 호출하는 /api/sensor 흐름과 대시보드/임계값 흐름을 쉽게 구분할 수 있다.
 try:
     from services.sensor_service import (
+        LIGHT_UNITS,
+        LIGHT_UNIT_DIGITAL,
+        LIGHT_UNIT_LUX,
         append_sensor_data,
         list_sensor_records,
         normalize_device_filter,
+        normalize_light_unit,
     )
 except ModuleNotFoundError:
     from app.services.sensor_service import (
+        LIGHT_UNITS,
+        LIGHT_UNIT_DIGITAL,
+        LIGHT_UNIT_LUX,
         append_sensor_data,
         list_sensor_records,
         normalize_device_filter,
+        normalize_light_unit,
     )
 
 
@@ -46,7 +56,10 @@ def _coerce_number(value):
     # 예: true가 1로 저장되면 조도/토양 디지털 값과 혼동될 수 있으므로 명시적으로 거부한다.
     if isinstance(value, bool):
         raise ValueError
-    return float(value)
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError
+    return number
 
 
 def _store_number(payload, key, value):
@@ -65,6 +78,8 @@ def _validate_number(payload, key, minimum, maximum, required=True):
     # 반환값은 라우트에서 그대로 details에 담아 ESP32/테스트 클라이언트가 원인을 알 수 있게 한다.
     if key not in payload:
         return "required" if required else None
+    if payload[key] is None and key in {"temperature", "humidity"}:
+        return None
 
     try:
         value = _coerce_number(payload[key])
@@ -75,6 +90,19 @@ def _validate_number(payload, key, minimum, maximum, required=True):
         return f"must be between {minimum} and {maximum}"
 
     _store_number(payload, key, value)
+    return None
+
+
+def _infer_light_unit(payload):
+    # light_unit을 보내지 않는 구형 펌웨어를 위한 추론이다.
+    # light_digital이 있고 light가 그 값과 같으면 비교기 모듈의 0/1 출력이므로 digital,
+    # 그 외에 light 값이 있으면 조도계가 측정한 lux로 본다.
+    light = payload.get("light")
+    light_digital = payload.get("light_digital")
+    if light_digital is not None and (light is None or light == light_digital):
+        return LIGHT_UNIT_DIGITAL
+    if light is not None:
+        return LIGHT_UNIT_LUX
     return None
 
 
@@ -89,13 +117,47 @@ def validate_sensor_payload(payload):
     # 대시보드의 장치 선택, /api/sensor?device_id=... 필터, 장치별 임계값 조회가 모두 이 값을 기준으로 한다.
     if not isinstance(device_id, str) or not device_id.strip():
         errors["device_id"] = "required"
+    elif len(device_id.strip()) > 64 or any(ord(ch) < 32 for ch in device_id.strip()):
+        errors["device_id"] = "must be 1-64 printable characters"
     else:
         payload["device_id"] = device_id.strip()
+
+    sample_id = payload.get("sample_id")
+    if sample_id is not None:
+        if not isinstance(sample_id, str) or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,95}", sample_id.strip()
+        ):
+            errors["sample_id"] = "must be 1-96 safe identifier characters"
+        else:
+            payload["sample_id"] = sample_id.strip()
+
+    sensor_errors = payload.get("sensor_errors")
+    if sensor_errors is not None:
+        if (
+            not isinstance(sensor_errors, list)
+            or len(sensor_errors) > 10
+            or any(not isinstance(item, str) or len(item) > 80 for item in sensor_errors)
+        ):
+            errors["sensor_errors"] = "must be a list of up to 10 short strings"
 
     if "light" not in payload and "light_digital" in payload:
         # 실제 조도 센서가 디지털 출력만 제공하는 경우에도 기존 대시보드의 light 컬럼/그래프가
         # 동작하도록 light 값이 없으면 light_digital을 대표 조도값으로 사용한다.
         payload["light"] = payload["light_digital"]
+
+    # light 값의 단위를 확정한다. 노드가 명시적으로 보내면 그 값을 쓰고,
+    # 보내지 않는 구형 펌웨어는 light_digital과 light가 같은지로 추론한다.
+    # 단위를 모른 채 lux 기준 임계값과 0/1을 비교하면 조도 판정이 의미를 잃는다.
+    if "light_unit" in payload:
+        light_unit = normalize_light_unit(payload["light_unit"])
+        if light_unit is None:
+            errors["light_unit"] = f"must be one of {', '.join(LIGHT_UNITS)}"
+        else:
+            payload["light_unit"] = light_unit
+    else:
+        inferred_unit = _infer_light_unit(payload)
+        if inferred_unit is not None:
+            payload["light_unit"] = inferred_unit
 
     for key, (minimum, maximum) in SENSOR_RANGES.items():
         error = _validate_number(payload, key, minimum, maximum, required=True)

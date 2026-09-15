@@ -5,6 +5,12 @@ from time import perf_counter
 from flask import Blueprint, jsonify, render_template, request
 
 try:
+    from services.auth_service import auth_enabled, protect_reads, request_is_authorized
+    from services.alert_service import (
+        count_active_alerts,
+        count_events,
+        list_events,
+    )
     from services.sensor_service import (
         count_sensor_history,
         get_latest_sensor_record,
@@ -12,11 +18,22 @@ try:
         get_sensor_rows_for_chart,
         get_sensor_stats,
         list_device_ids_from_db,
+        list_device_status,
         normalize_device_filter,
         parse_record_time,
         sensor_data_mtime,
     )
 except ModuleNotFoundError:
+    from app.services.auth_service import (
+        auth_enabled,
+        protect_reads,
+        request_is_authorized,
+    )
+    from app.services.alert_service import (
+        count_active_alerts,
+        count_events,
+        list_events,
+    )
     from app.services.sensor_service import (
         count_sensor_history,
         get_latest_sensor_record,
@@ -24,6 +41,7 @@ except ModuleNotFoundError:
         get_sensor_rows_for_chart,
         get_sensor_stats,
         list_device_ids_from_db,
+        list_device_status,
         normalize_device_filter,
         parse_record_time,
         sensor_data_mtime,
@@ -104,23 +122,39 @@ def _aggregate_chart(rows, period):
             labels.append(label)
         groups[label].append(row)
 
+    lux_count = sum(int(row.get("lux_count") or 0) for row in rows)
+    digital_count = sum(int(row.get("digital_count") or 0) for row in rows)
+    if lux_count and digital_count:
+        light_mode = "mixed"
+    elif lux_count:
+        light_mode = "lux"
+    elif digital_count:
+        light_mode = "digital"
+    else:
+        light_mode = "none"
+
     return {
         "labels": labels,
         "temperature": [_avg(groups[label], "temperature") for label in labels],
         "humidity": [_avg(groups[label], "humidity") for label in labels],
         "soil_moisture": [_avg(groups[label], "soil_moisture") for label in labels],
-        "light": [_avg(groups[label], "light", "light_digital") for label in labels],
+        "light": [_avg(groups[label], "light") for label in labels],
+        "light_mode": light_mode,
+        "light_count": lux_count,
+        "digital_light_count": digital_count,
     }
 
 
 @dashboard_bp.route("/dashboard")
 def dashboard():
     selected_device_id = _selected_device_id()
-    latest = get_latest_sensor_record(selected_device_id)
+    may_embed_data = not (auth_enabled() and protect_reads()) or request_is_authorized()
+    latest = get_latest_sensor_record(selected_device_id) if may_embed_data else None
+    devices = _device_options(selected_device_id) if may_embed_data else []
     return render_template(
         "index.html",
         latest=latest,
-        devices=_device_options(selected_device_id),
+        devices=devices,
         current_device_id=selected_device_id,
     )
 
@@ -195,4 +229,78 @@ def dashboard_devices():
     return jsonify({
         "devices": devices,
         "current_device_id": selected_device_id,
+    })
+
+
+@dashboard_bp.route("/api/dashboard/device-status")
+def dashboard_device_status():
+    # 장치별 마지막 수신 시각과 온라인/오프라인 상태를 내려준다.
+    # 대시보드 헤더 배지가 이 응답으로 갱신된다.
+    start = perf_counter()
+    device_id = _selected_device_id()
+    statuses = list_device_status(device_id)
+
+    # 특정 장치를 보고 있으면 그 장치의 상태를 요약으로 함께 내려 화면에서 바로 쓰게 한다.
+    current = None
+    if device_id:
+        current = next(
+            (entry for entry in statuses if entry["device_id"] == device_id),
+            # 아직 한 건도 수신하지 않은 장치는 집계 결과에 나오지 않는다.
+            {
+                "device_id": device_id,
+                "last_seen_at": None,
+                "age_seconds": None,
+                "status": "unknown",
+                "total": 0,
+            },
+        )
+
+    offline = [entry for entry in statuses if entry["status"] == "offline"]
+    _log_api("device-status", start, count=len(statuses), offline=len(offline))
+    return jsonify({
+        "devices": statuses,
+        "current": current,
+        "offline_count": len(offline),
+    })
+
+
+@dashboard_bp.route("/api/events")
+@dashboard_bp.route("/api/dashboard/events")
+def dashboard_events():
+    # event_log에 쌓인 이상/복구 알림 기록을 페이지 단위로 조회한다.
+    # 지금까지는 Discord로 한 번 보내고 끝이라 서버에만 남아 있던 데이터다.
+    start = perf_counter()
+    page = _positive_int(request.args.get("page"), 1)
+    per_page = _positive_int(request.args.get("per_page"), 10, maximum=200)
+    status = (request.args.get("status") or "").strip() or None
+    metric = (request.args.get("metric") or "").strip() or None
+    date_str = (request.args.get("date") or "").strip()
+    time_from = (request.args.get("time_from") or "").strip()
+    time_to = (request.args.get("time_to") or "").strip()
+    device_id = _selected_device_id()
+
+    total = count_events(
+        device_id, status, metric, date_str, time_from, time_to
+    )
+    pages = max(1, (total + per_page - 1) // per_page)
+    page = min(page, pages)
+    items = list_events(
+        device_id,
+        page,
+        per_page,
+        status,
+        metric,
+        date_str,
+        time_from,
+        time_to,
+    )
+
+    _log_api("events", start, total=total, page=page)
+    return jsonify({
+        "items": items,
+        "page": page,
+        "per_page": per_page,
+        "pages": pages,
+        "total": total,
+        "active": count_active_alerts(device_id),
     })

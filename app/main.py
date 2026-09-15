@@ -1,4 +1,10 @@
+import math
+import logging
+import os
+import sqlite3
+
 from flask import Flask, jsonify, request, redirect
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 # 이 파일은 Flask 애플리케이션의 진입점이다.
 # 센서 수집 API는 app/routes/sensor.py의 Blueprint가 담당하고,
@@ -10,7 +16,16 @@ try:
     from routes.dashboard import dashboard_bp
     from routes.sensor import sensor_bp
     from routes.cultivation import cultivation_bp
+    from routes.management import management_bp
+    from services.auth_service import (
+        auth_enabled,
+        install as install_auth,
+        protect_reads,
+        request_is_authorized,
+    )
+    from services.alert_service import start_offline_watchdog
     from services.sensor_service import (
+        LIGHT_UNIT_LUX,
         get_latest_sensor_record,
     )
     from services.threshold_service import (
@@ -25,6 +40,7 @@ try:
         create_crop,
         update_crop,
         delete_crop,
+        get_crop,
         get_device_crop,
         set_device_crop,
     )
@@ -32,7 +48,16 @@ except ModuleNotFoundError:
     from app.routes.dashboard import dashboard_bp
     from app.routes.sensor import sensor_bp
     from app.routes.cultivation import cultivation_bp
+    from app.routes.management import management_bp
+    from app.services.auth_service import (
+        auth_enabled,
+        install as install_auth,
+        protect_reads,
+        request_is_authorized,
+    )
+    from app.services.alert_service import start_offline_watchdog
     from app.services.sensor_service import (
+        LIGHT_UNIT_LUX,
         get_latest_sensor_record,
     )
     from app.services.threshold_service import (
@@ -47,17 +72,80 @@ except ModuleNotFoundError:
         create_crop,
         update_crop,
         delete_crop,
+        get_crop,
         get_device_crop,
         set_device_crop,
     )
 
-app = Flask(__name__)
+app = Flask(
+    __name__,
+    static_folder=os.path.join(os.path.dirname(__file__), "..", "static"),
+    static_url_path="/static",
+)
+app.config["MAX_CONTENT_LENGTH"] = int(
+    os.environ.get("SMART_FARM_MAX_REQUEST_BYTES", 64 * 1024)
+)
+logging.basicConfig(
+    level=os.environ.get("SMART_FARM_LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+if os.environ.get("SMART_FARM_BEHIND_PROXY", "").strip().lower() in {
+    "1", "true", "yes", "on"
+}:
+    # localhost의 신뢰할 수 있는 단일 reverse proxy 뒤에서만 켠다.
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 # /dashboard, /api/dashboard/* 라우트 등록
 app.register_blueprint(dashboard_bp)
 # /api/sensor GET/POST 라우트 등록
 app.register_blueprint(sensor_bp)
 # /api/growth, /api/watering, /api/analysis/daily 라우트 등록
 app.register_blueprint(cultivation_bp)
+# /api/devices, /api/alert-settings, /api/export/*, /api/maintenance/* 라우트 등록
+app.register_blueprint(management_bp)
+# API 키 인증 훅을 건다.
+# SMART_FARM_API_KEY가 설정되지 않으면 아무 것도 막지 않으므로
+# 기존 설치 환경은 업데이트만으로 잠기지 않는다.
+# 라우트 등록 뒤에 걸어 모든 Blueprint에 동일하게 적용한다.
+install_auth(app)
+
+
+@app.errorhandler(sqlite3.Error)
+def _database_error(error):
+    app.logger.exception("Database operation failed", exc_info=error)
+    return jsonify({"error": "Database temporarily unavailable"}), 503
+
+
+@app.after_request
+def _security_headers(response):
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+        "connect-src 'self'; frame-ancestors 'none'; base-uri 'self'",
+    )
+    if request.is_secure:
+        response.headers.setdefault(
+            "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
+        )
+    return response
+
+# 장치 오프라인 감시 스레드는 첫 요청을 처리할 때 기동한다.
+# import 시점에 바로 띄우면 Flask 개발 서버의 reloader 부모 프로세스에서도 실행되어
+# 같은 알림이 두 번 나간다. 요청을 실제로 받는 프로세스는 항상 하나뿐이다.
+_background_jobs_started = False
+
+
+@app.before_request
+def _ensure_background_jobs():
+    global _background_jobs_started
+    # 테스트 요청이 실제 운영 DB를 감시하거나 백그라운드 스레드를 남기지 않게 한다.
+    if app.config.get("TESTING") or _background_jobs_started:
+        return
+    _background_jobs_started = True
+    start_offline_watchdog()
 
 # 임계값은 최소/최대가 한 쌍으로 들어온다.
 # 저장 전 검증 단계에서 최소값이 최대값보다 큰 잘못된 설정을 막기 위해
@@ -68,6 +156,12 @@ THRESHOLD_PAIRS = [
     ("soil_moisture_min", "soil_moisture_max"),
     ("light_min", "light_max"),
 ]
+THRESHOLD_RANGES = {
+    "temperature": (-40, 85),
+    "humidity": (0, 100),
+    "soil_moisture": (0, 100),
+    "light": (0, 200000),
+}
 
 
 def _coerce_number(value):
@@ -75,7 +169,10 @@ def _coerce_number(value):
     # ESP32와 대시보드는 임계값을 실제 센서 범위 비교에 사용하므로 명시적인 숫자만 받는다.
     if isinstance(value, bool):
         raise ValueError
-    return float(value)
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError
+    return number
 
 
 def _normalize_required_device_id(value):
@@ -86,7 +183,9 @@ def _normalize_required_device_id(value):
         return None
 
     value = value.strip()
-    return value or None
+    if not value or len(value) > 64 or any(ord(ch) < 32 for ch in value):
+        return None
+    return value
 
 
 def _store_threshold_number(values, key, value):
@@ -146,6 +245,11 @@ def validate_threshold_payload(payload):
         if min_key in values and max_key in values and values[min_key] > values[max_key]:
             errors[min_key] = "must be less than or equal to max"
             errors[max_key] = "must be greater than or equal to min"
+        metric = min_key.removesuffix("_min")
+        allowed_min, allowed_max = THRESHOLD_RANGES[metric]
+        for key in (min_key, max_key):
+            if key in values and not allowed_min <= values[key] <= allowed_max:
+                errors[key] = f"must be between {allowed_min} and {allowed_max}"
 
     return device_id, values, errors
 
@@ -161,10 +265,21 @@ def home():
 def status():
     # 서버가 살아 있는지 간단히 확인하는 상태 API다.
     # 최신 센서 row도 함께 내려주기 때문에 ESP32 수신 여부를 빠르게 점검할 수 있다.
-    return jsonify({
+    try:
+        from services.sensor_service import health_status
+        from services.alert_service import delivery_health
+    except ModuleNotFoundError:
+        from app.services.sensor_service import health_status
+        from app.services.alert_service import delivery_health
+    result = {
         "message": "Smart Farm Server Running",
-        "latest": get_latest_sensor_record()
-    })
+        "health": health_status(),
+        "alerts": delivery_health(),
+    }
+    if not (auth_enabled() and protect_reads()) or request_is_authorized():
+        result["latest"] = get_latest_sensor_record()
+    status_code = 200 if result["health"]["database"] == "ok" else 503
+    return jsonify(result), status_code
 
 
 @app.route("/api/thresholds", methods=["GET"])
@@ -193,6 +308,55 @@ def save_thresholds():
     return jsonify(upsert_thresholds(device_id, values))
 
 
+@app.route("/api/thresholds/from-crop", methods=["POST"])
+def apply_crop_thresholds():
+    # 작물 프로필의 권장 범위를 해당 장치의 실제 임계값으로 복사한다.
+    #
+    # 이 API가 없으면 대시보드에서 작물을 바꿔도 화면의 가이드 범위와 차트 기준선만 바뀌고,
+    # ESP32의 LED 판단과 Discord 알림이 사용하는 threshold_settings는 그대로 남는다.
+    # 즉 사용자가 보는 기준과 실제 판정 기준이 달라진다. 여기서 둘을 일치시킨다.
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "No JSON received"}), 400
+
+    device_id = _normalize_required_device_id(payload.get("device_id"))
+    if device_id is None:
+        return jsonify({"error": "device_id is required"}), 400
+
+    crop_id = payload.get("crop_id")
+    if isinstance(crop_id, bool) or not isinstance(crop_id, int):
+        return jsonify({"error": "crop_id must be an integer"}), 400
+
+    crop = get_crop(crop_id)
+    if not crop:
+        return jsonify({"error": "Crop not found"}), 404
+
+    latest = get_latest_sensor_record(device_id) or {}
+    light_unit = latest.get("light_unit")
+    light_unit_mismatch = light_unit is not None and light_unit != LIGHT_UNIT_LUX
+
+    # 토양 보정 원시값(soil_dry_raw/soil_wet_raw)은 센서 하드웨어 특성이지 작물 특성이 아니다.
+    # 작물을 바꿨다고 현장에서 실측한 보정값을 덮어쓰면 안 되므로 임계값만 복사한다.
+    values = {field: crop[field] for field in THRESHOLD_FIELDS if field in crop}
+    if light_unit_mismatch:
+        # 디지털 조도는 0/1이고 작물 프로필은 lux다. lux 범위를 그대로 복사하면
+        # 업데이트 전 펌웨어까지 포함해 LED가 항상 비정상으로 판정될 수 있으므로
+        # 디지털 입력의 전체 범위를 정상으로 두고 서버 알림은 단위 기준으로 건너뛴다.
+        values["light_min"] = 0
+        values["light_max"] = 1
+    # 임계값과 장치-작물 매핑은 같은 설정 DB 트랜잭션에서 함께 저장한다.
+    thresholds = upsert_thresholds(device_id, values, crop_id=crop_id)
+
+    # 작물 프로필의 조도 기준은 lux 단위다.
+    # 디지털 조도 센서(0/1)를 쓰는 장치에서는 그대로 비교할 수 없어 경고를 함께 내려준다.
+    return jsonify({
+        "thresholds": thresholds,
+        "crop": crop,
+        "light_unit": light_unit,
+        "light_unit_mismatch": light_unit_mismatch,
+    })
+
+
 # ── Crop profile API ──────────────────────────────────────────────────────────
 
 _CROP_PAIRS = [
@@ -210,6 +374,8 @@ def _validate_crop_payload(payload):
     name = payload.get("name", "")
     if not isinstance(name, str) or not name.strip():
         errors["name"] = "required"
+    elif len(name.strip()) > 80:
+        errors["name"] = "must be 80 characters or fewer"
     else:
         data["name"] = name.strip()
 
@@ -222,6 +388,8 @@ def _validate_crop_payload(payload):
             if isinstance(v, bool):
                 raise ValueError
             v = float(v)
+            if not math.isfinite(v):
+                raise ValueError
             data[key] = int(v) if v.is_integer() else v
         except (TypeError, ValueError):
             errors[key] = "must be a number"
@@ -229,9 +397,32 @@ def _validate_crop_payload(payload):
     for min_key, max_key in _CROP_PAIRS:
         if min_key in data and max_key in data and data[min_key] > data[max_key]:
             errors[min_key] = "최솟값은 최댓값보다 클 수 없습니다."
+        metric = min_key.removesuffix("_min")
+        allowed_min, allowed_max = THRESHOLD_RANGES[metric]
+        for key in (min_key, max_key):
+            if key in data and not allowed_min <= data[key] <= allowed_max:
+                errors[key] = f"must be between {allowed_min} and {allowed_max}"
 
     notes_raw = payload.get("notes", [])
-    data["notes"] = [str(n) for n in notes_raw if n] if isinstance(notes_raw, list) else []
+    if not isinstance(notes_raw, list):
+        errors["notes"] = "must be a list"
+        data["notes"] = []
+    elif len(notes_raw) > 50:
+        errors["notes"] = "must contain 50 items or fewer"
+        data["notes"] = []
+    else:
+        notes = []
+        for note in notes_raw:
+            if not isinstance(note, str):
+                errors["notes"] = "items must be strings"
+                break
+            cleaned = note.strip()
+            if len(cleaned) > 500:
+                errors["notes"] = "each item must be 500 characters or fewer"
+                break
+            if cleaned:
+                notes.append(cleaned)
+        data["notes"] = notes
 
     return data, errors
 

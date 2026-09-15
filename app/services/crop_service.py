@@ -2,6 +2,7 @@ import json
 import os
 import sqlite3
 import threading
+from contextlib import closing
 
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB_FILE = os.environ.get(
@@ -71,6 +72,8 @@ def _connect():
     os.makedirs(data_dir, exist_ok=True)
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
@@ -152,7 +155,7 @@ def _row_to_dict(row):
 
 def list_crops():
     with _lock:
-        with _connect() as conn:
+        with closing(_connect()) as conn:
             _ensure_tables(conn)
             rows = conn.execute(
                 "SELECT * FROM crop_profiles ORDER BY id ASC"
@@ -162,7 +165,7 @@ def list_crops():
 
 def get_crop(crop_id):
     with _lock:
-        with _connect() as conn:
+        with closing(_connect()) as conn:
             _ensure_tables(conn)
             row = conn.execute(
                 "SELECT * FROM crop_profiles WHERE id = ?", (crop_id,)
@@ -173,7 +176,7 @@ def get_crop(crop_id):
 def create_crop(data):
     notes_json = json.dumps(data.get("notes", []), ensure_ascii=False)
     with _lock:
-        with _connect() as conn:
+        with closing(_connect()) as conn:
             _ensure_tables(conn)
             cur = conn.execute(
                 """INSERT INTO crop_profiles
@@ -201,7 +204,7 @@ def create_crop(data):
 def update_crop(crop_id, data):
     notes_json = json.dumps(data.get("notes", []), ensure_ascii=False)
     with _lock:
-        with _connect() as conn:
+        with closing(_connect()) as conn:
             _ensure_tables(conn)
             conn.execute(
                 """UPDATE crop_profiles
@@ -229,7 +232,7 @@ def update_crop(crop_id, data):
 
 def delete_crop(crop_id):
     with _lock:
-        with _connect() as conn:
+        with closing(_connect()) as conn:
             _ensure_tables(conn)
             count = conn.execute(
                 "SELECT COUNT(*) FROM crop_profiles"
@@ -254,7 +257,7 @@ def delete_crop(crop_id):
 def get_device_crop(device_id):
     # 장치에 할당된 작물을 반환한다. 할당 기록이 없으면 첫 번째 작물을 기본값으로 반환한다.
     with _lock:
-        with _connect() as conn:
+        with closing(_connect()) as conn:
             _ensure_tables(conn)
             row = conn.execute(
                 """SELECT cp.* FROM crop_profiles cp
@@ -272,7 +275,7 @@ def get_device_crop(device_id):
 
 def set_device_crop(device_id, crop_id):
     with _lock:
-        with _connect() as conn:
+        with closing(_connect()) as conn:
             _ensure_tables(conn)
             exists = conn.execute(
                 "SELECT device_id FROM device_crop WHERE device_id=?", (device_id,)

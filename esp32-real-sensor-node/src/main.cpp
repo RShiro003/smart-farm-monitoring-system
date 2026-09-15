@@ -3,6 +3,7 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <DHT.h>
+#include <esp_system.h>
 #include <time.h>
 
 #include "secrets.h"
@@ -19,6 +20,13 @@ const unsigned long THRESHOLD_FETCH_INTERVAL_MS = 45000;
 // 네트워크가 불안정할 때 loop가 오래 멈추지 않도록 HTTP/Wi-Fi 대기 시간을 제한한다.
 const unsigned long HTTP_TIMEOUT_MS = 3000;
 const unsigned long WIFI_CONNECT_TIMEOUT_MS = 15000;
+const size_t SENSOR_QUEUE_CAPACITY = 30;
+
+String pendingSensorPayloads[SENSOR_QUEUE_CAPACITY];
+size_t pendingSensorHead = 0;
+size_t pendingSensorCount = 0;
+String bootId;
+uint32_t sampleSequence = 0;
 
 // ESP32 timestamp는 NTP로 맞춘 한국 시간(UTC+9)을 사용한다.
 // 서버는 server_received_at을 별도로 저장하므로 ESP32 시간과 서버 수신 시간을 구분할 수 있다.
@@ -44,6 +52,54 @@ const unsigned long SOIL_SAMPLE_INTERVAL_MS = 10;
 #define LED_WHITE_PIN 18
 
 DHT dht(DHT_PIN, DHT_TYPE);
+
+void addAuthHeader(HTTPClient& http) {
+  // 서버가 API 키를 쓰지 않으면 빈 문자열이므로 헤더를 붙이지 않는다.
+  // 이렇게 해야 키를 설정하지 않은 기존 환경에서도 그대로 동작한다.
+  if (API_KEY != nullptr && strlen(API_KEY) > 0) {
+    http.addHeader("X-API-Key", API_KEY);
+  }
+}
+
+void enqueueSensorPayload(const String& payload) {
+  if (pendingSensorCount == SENSOR_QUEUE_CAPACITY) {
+    // 가장 오래된 샘플을 버리고 최신 데이터가 큐에 들어갈 자리를 만든다.
+    pendingSensorHead = (pendingSensorHead + 1) % SENSOR_QUEUE_CAPACITY;
+    pendingSensorCount--;
+    Serial.println("Sensor retry queue full; oldest sample dropped");
+  }
+  size_t tail = (pendingSensorHead + pendingSensorCount) % SENSOR_QUEUE_CAPACITY;
+  pendingSensorPayloads[tail] = payload;
+  pendingSensorCount++;
+}
+
+bool postSensorPayload(const String& payload) {
+  if (WiFi.status() != WL_CONNECTED) return false;
+  HTTPClient http;
+  http.begin(SERVER_URL);
+  http.setTimeout(HTTP_TIMEOUT_MS);
+  http.addHeader("Content-Type", "application/json");
+  addAuthHeader(http);
+  int responseCode = http.POST(payload);
+  bool success = responseCode >= 200 && responseCode < 300;
+  Serial.print("Sensor POST response: ");
+  Serial.println(responseCode);
+  http.end();
+  return success;
+}
+
+void flushSensorQueue() {
+  // 한 loop에서 너무 오래 블로킹하지 않도록 최대 다섯 건만 재전송한다.
+  size_t sent = 0;
+  while (pendingSensorCount > 0 && sent < 5) {
+    String& payload = pendingSensorPayloads[pendingSensorHead];
+    if (!postSensorPayload(payload)) return;
+    payload = "";
+    pendingSensorHead = (pendingSensorHead + 1) % SENSOR_QUEUE_CAPACITY;
+    pendingSensorCount--;
+    sent++;
+  }
+}
 
 int readSoilRaw() {
   long total = 0;
@@ -215,6 +271,7 @@ bool fetchThresholdsFromServer() {
 
   http.begin(requestUrl);
   http.setTimeout(HTTP_TIMEOUT_MS);
+  addAuthHeader(http);
 
   int responseCode = http.GET();
   if (responseCode != HTTP_CODE_OK) {
@@ -225,7 +282,7 @@ bool fetchThresholdsFromServer() {
   }
 
   String payload = http.getString();
-  StaticJsonDocument<512> doc;
+  JsonDocument doc;
   DeserializationError error = deserializeJson(doc, payload);
   if (error) {
     Serial.print("Threshold JSON parse failed: ");
@@ -281,9 +338,9 @@ FarmStatus evaluateFarmStatus(float temperature, float humidity, int soilMoistur
     return STATUS_ABNORMAL;
   }
 
-  if (light < thresholds.lightMin || light > thresholds.lightMax) {
-    return STATUS_ABNORMAL;
-  }
+  // 현재 하드웨어의 조도 입력은 lux가 아니라 비교기 모듈의 디지털 0/1이다.
+  // 서버의 작물 조도 기준은 lux이므로 서로 직접 비교하지 않는다.
+  // 추후 BH1750 같은 lux 센서로 교체할 때 실제 lux 값을 전송하고 이 검사를 활성화한다.
 
   return STATUS_NORMAL;
 }
@@ -316,6 +373,8 @@ void setup() {
   delay(2000);
 
   Serial.begin(115200);
+  uint64_t chipId = ESP.getEfuseMac();
+  bootId = String((uint32_t)chipId, HEX) + "-" + String(esp_random(), HEX);
 
   dht.begin();
 
@@ -369,13 +428,14 @@ void loop() {
   // 실패하면 -1로 보내 서버/대시보드에서 비정상 데이터임을 확인할 수 있게 한다.
   float temperature = dht.readTemperature();
   float humidity = dht.readHumidity();
+  bool dhtValid = !isnan(temperature) && !isnan(humidity);
 
   // SEN0308 방수형 정전식 토양수분 센서의 아날로그 출력을 여러 번 읽어 평균낸다.
   // 원시값은 현장 보정과 진단을 위해 변환된 수분값과 함께 서버로 전송한다.
   int soilRaw = readSoilRaw();
   int lightDigital = digitalRead(LIGHT_DO_PIN);
 
-  if (isnan(temperature) || isnan(humidity)) {
+  if (!dhtValid) {
     Serial.println("Failed to read from DHT sensor");
     temperature = -1;
     humidity = -1;
@@ -428,33 +488,54 @@ void loop() {
   Serial.print("LED state: ");
   Serial.println(farmStatusName(status));
 
-  if (WiFi.status() == WL_CONNECTED) {
-    HTTPClient http;
+  {
 
     // Flask 서버의 센서 수집 endpoint로 전송한다.
     // Content-Type이 application/json이어야 Flask request.get_json()이 body를 dict로 해석한다.
-    http.begin(SERVER_URL);
-    http.setTimeout(HTTP_TIMEOUT_MS);
-    http.addHeader("Content-Type", "application/json");
-
     String jsonData = "{";
     // JSON 필드명은 Flask의 validate_sensor_payload()와 sensor_service._COLUMNS 기준에 맞춘다.
     // soil_raw와 light_digital은 선택 진단값으로 저장되며, 아날로그 전용 SEN0308에는 soil_digital이 없다.
     jsonData += "\"device_id\":\"";
     jsonData += DEVICE_ID;
     jsonData += "\",";
+    jsonData += "\"sample_id\":\"" + bootId + "-" + String(++sampleSequence) + "\",";
     jsonData += "\"timestamp\":\"" + timestamp + "\",";
-    jsonData += "\"temperature\":" + String(temperature, 2) + ",";
-    jsonData += "\"humidity\":" + String(humidity, 2) + ",";
+    jsonData += "\"temperature\":";
+    jsonData += dhtValid ? String(temperature, 2) : "null";
+    jsonData += ",\"humidity\":";
+    jsonData += dhtValid ? String(humidity, 2) : "null";
+    jsonData += ",";
     jsonData += "\"soil_moisture\":" + String(soilMoisture) + ",";
     jsonData += "\"soil_raw\":" + String(soilRaw) + ",";
     jsonData += "\"light\":" + String(lightDigital) + ",";
-    jsonData += "\"light_digital\":" + String(lightDigital);
+    // 이 노드의 조도 센서는 비교기 모듈의 디지털 출력(0/1)만 제공한다.
+    // 단위를 명시해야 서버가 lux 기준 임계값과 잘못 비교하지 않는다.
+    jsonData += "\"light_unit\":\"digital\",";
+    jsonData += "\"light_digital\":" + String(lightDigital) + ",";
+    jsonData += "\"sensor_errors\":";
+    jsonData += dhtValid ? "[]" : "[\"dht_read_failed\"]";
     jsonData += "}";
+
+    if (WiFi.status() != WL_CONNECTED) {
+      enqueueSensorPayload(jsonData);
+      Serial.println("WiFi disconnected. Sensor sample queued.");
+      delay(5000);
+      return;
+    }
+
+    flushSensorQueue();
+    HTTPClient http;
+    http.begin(SERVER_URL);
+    http.setTimeout(HTTP_TIMEOUT_MS);
+    http.addHeader("Content-Type", "application/json");
+    addAuthHeader(http);
 
     // 정상 저장 시 Flask는 201을 반환한다.
     // 응답 body에는 서버가 받은 data가 들어 있어 Serial Monitor에서 전송 내용 확인에 사용할 수 있다.
     int responseCode = http.POST(jsonData);
+    if (responseCode < 200 || responseCode >= 300) {
+      enqueueSensorPayload(jsonData);
+    }
 
     Serial.print("Send: ");
     Serial.println(jsonData);
@@ -466,8 +547,6 @@ void loop() {
     Serial.println(response);
 
     http.end();
-  } else {
-    Serial.println("WiFi disconnected. Data not sent.");
   }
 
   delay(5000);

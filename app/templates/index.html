@@ -4,8 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Smart Farm Dashboard</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1/dist/chartjs-plugin-annotation.min.js"></script>
+    <script src="/static/vendor/chart.umd.min.js"></script>
+    <script src="/static/vendor/chartjs-plugin-annotation.min.js"></script>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -420,7 +420,8 @@
         }
 
         .history-filters input[type="date"],
-        .history-filters input[type="time"] {
+        .history-filters input[type="time"],
+        .history-filters select {
             background: #0f172a;
             border: 1px solid #334155;
             border-radius: 6px;
@@ -431,6 +432,8 @@
         }
 
         .history-filters input:focus { outline: none; border-color: #4ade80; }
+
+        .event-filters { margin-bottom: 12px; }
 
         .history-filters .sep { color: #475569; font-size: 0.8rem; }
 
@@ -713,6 +716,182 @@
         }
         .crop-form-textarea:focus { outline: none; border-color: #4ade80; }
 
+        /* ── Device online/offline badge ── */
+        .dev-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            padding: 2px 9px;
+            border-radius: 999px;
+            font-size: 0.7rem;
+            font-weight: 700;
+            margin-right: 8px;
+            vertical-align: middle;
+        }
+
+        .dev-badge::before {
+            content: '';
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: currentColor;
+        }
+
+        .dev-online  { background: rgba(74,222,128,.14); color: #4ade80; border: 1px solid rgba(74,222,128,.3); }
+        .dev-offline { background: rgba(248,113,113,.14); color: #f87171; border: 1px solid rgba(248,113,113,.3); }
+        .dev-unknown { background: rgba(71,85,105,.2);   color: #64748b; border: 1px solid #334155; }
+
+        /* 오프라인일 때는 점이 깜빡여 화면을 잠깐 봐도 눈에 들어오게 한다. */
+        .dev-offline::before { animation: dev-pulse 1.4s ease-in-out infinite; }
+
+        @keyframes dev-pulse {
+            0%, 100% { opacity: 1; }
+            50%      { opacity: 0.25; }
+        }
+
+        /* ── Event log ── */
+        .event-count-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            margin-left: 8px;
+            padding: 2px 8px;
+            border-radius: 999px;
+            font-size: 0.66rem;
+            font-weight: 700;
+            background: rgba(248,113,113,.15);
+            color: #f87171;
+            border: 1px solid rgba(248,113,113,.3);
+            text-transform: none;
+            letter-spacing: 0;
+        }
+
+        .event-status {
+            display: inline-block;
+            padding: 2px 9px;
+            border-radius: 999px;
+            font-size: 0.7rem;
+            font-weight: 700;
+            white-space: nowrap;
+        }
+
+        .event-abnormal  { background: rgba(248,113,113,.15); color: #f87171; border: 1px solid rgba(248,113,113,.3); }
+        .event-danger    { background: rgba(220,38,38,.28); color: #fecaca; border: 1px solid #dc2626; }
+        .event-recovered { background: rgba(74,222,128,.15);  color: #4ade80; border: 1px solid rgba(74,222,128,.3); }
+
+        td.event-range { color: #64748b; font-size: 0.78rem; white-space: nowrap; }
+        td.event-value { font-weight: 600; color: #f1f5f9; white-space: nowrap; }
+
+        /* ── Crop → threshold sync ── */
+        .threshold-sync {
+            margin-top: 8px;
+            font-size: 0.7rem;
+            line-height: 1.5;
+            color: #64748b;
+        }
+
+        .threshold-sync.diff { color: #fbbf24; }
+        .threshold-sync.same { color: #4ade80; }
+
+        /* ── Header actions ── */
+        .header-actions { display: flex; align-items: center; gap: 10px; }
+
+        .icon-btn {
+            background: #0f172a;
+            border: 1px solid #334155;
+            border-radius: 8px;
+            color: #94a3b8;
+            cursor: pointer;
+            font-size: 0.78rem;
+            font-weight: 600;
+            padding: 6px 12px;
+            transition: all 0.15s;
+            white-space: nowrap;
+        }
+        .icon-btn:hover { color: #e2e8f0; border-color: #4ade80; }
+
+        .auth-chip {
+            display: none;
+            align-items: center;
+            gap: 5px;
+            padding: 3px 9px;
+            border-radius: 999px;
+            font-size: 0.68rem;
+            font-weight: 700;
+            background: rgba(74,222,128,.14);
+            color: #4ade80;
+            border: 1px solid rgba(74,222,128,.3);
+            cursor: pointer;
+        }
+        .auth-chip.auth-needed {
+            background: rgba(251,191,36,.14);
+            color: #fbbf24;
+            border-color: rgba(251,191,36,.3);
+        }
+
+        /* ── Settings cards in side panel ── */
+        .setting-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            padding: 5px 0;
+        }
+
+        .setting-row label { font-size: 0.76rem; color: #94a3b8; cursor: pointer; }
+
+        .setting-row input[type="checkbox"] {
+            width: 16px; height: 16px;
+            accent-color: #4ade80;
+            cursor: pointer;
+        }
+
+        .setting-input {
+            width: 100%;
+            background: #0f172a;
+            border: 1px solid #334155;
+            border-radius: 6px;
+            color: #e2e8f0;
+            padding: 7px 9px;
+            font-size: 0.8rem;
+        }
+        .setting-input:focus { outline: none; border-color: #4ade80; }
+
+        .setting-hint { font-size: 0.68rem; color: #64748b; line-height: 1.5; margin-top: 6px; }
+
+        .storage-stat {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.76rem;
+            color: #94a3b8;
+            padding: 3px 0;
+        }
+        .storage-stat b { color: #f1f5f9; font-weight: 600; }
+
+        /* ── Device manager modal ── */
+        .device-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px 12px;
+            background: #0f172a;
+            border: 1px solid #1e293b;
+            border-radius: 8px;
+        }
+        .device-row-main { flex: 1; min-width: 0; }
+        .device-row-name { font-size: 0.86rem; font-weight: 600; color: #f1f5f9; }
+        .device-row-meta { font-size: 0.7rem; color: #64748b; margin-top: 2px; }
+
+        .device-tag {
+            font-size: 0.64rem;
+            font-weight: 700;
+            padding: 2px 7px;
+            border-radius: 999px;
+            white-space: nowrap;
+        }
+        .tag-registered { background: rgba(74,222,128,.14); color: #4ade80; border: 1px solid rgba(74,222,128,.3); }
+        .tag-unknown    { background: rgba(251,191,36,.14); color: #fbbf24; border: 1px solid rgba(251,191,36,.3); }
+
         /* ── Pagination ── */
         .pagination {
             display: flex;
@@ -754,17 +933,23 @@
 
 <header>
     <div class="header-title">🌱 Smart Farm</div>
-    <form class="device-picker" method="get" action="/dashboard">
-        <label for="device-select">장치</label>
-        <select id="device-select" name="device_id" onchange="this.form.submit()">
-            <option value="all" {% if not current_device_id %}selected{% endif %}>전체</option>
-            {% for device in devices %}
-            <option value="{{ device }}" {% if device == current_device_id %}selected{% endif %}>
-                {{ device }}
-            </option>
-            {% endfor %}
-        </select>
-    </form>
+    <div class="header-actions">
+        <button id="auth-chip" type="button" class="auth-chip"
+                onclick="openAuthModal()" title="API 인증 상태">🔒 인증</button>
+        <button id="device-manage-btn" class="icon-btn" type="button"
+                onclick="openDeviceModal()" title="장치 이름과 위치 관리">장치 관리</button>
+        <form class="device-picker" method="get" action="/dashboard">
+            <label for="device-select">장치</label>
+            <select id="device-select" name="device_id" onchange="this.form.submit()">
+                <option value="all" {% if not current_device_id %}selected{% endif %}>전체</option>
+                {% for device in devices %}
+                <option value="{{ device }}" {% if device == current_device_id %}selected{% endif %}>
+                    {{ device }}
+                </option>
+                {% endfor %}
+            </select>
+        </form>
+    </div>
 </header>
 
 <div class="app-layout">
@@ -775,6 +960,7 @@
         <div class="section-header">
             <div class="section-title">현재 센서 값</div>
             <div style="font-size:0.72rem;color:#475569;" id="live-time-wrap">
+                <span id="device-status-badge" class="dev-badge dev-unknown" title="장치 연결 상태">확인 중</span>
                 마지막 수신: <span id="live-time">{% if latest %}{% if latest.server_received_at %}{{ latest.server_received_at }}{% elif latest.time %}{{ latest.time }}{% elif latest.timestamp %}{{ latest.timestamp }}{% else %}—{% endif %}{% else %}—{% endif %}</span>
             </div>
         </div>
@@ -795,7 +981,8 @@
             </div>
             <div class="card light">
                 <div class="label">조도</div>
-                <div class="value"><span id="live-light">{% if latest and latest.light is not none %}{{ latest.light }}{% elif latest and latest.light_digital is not none %}{{ latest.light_digital }}{% else %}—{% endif %}</span><span class="unit">lux</span></div>
+                <div class="value"><span id="live-light">{% if latest and latest.light is not none %}{{ latest.light }}{% elif latest and latest.light_digital is not none %}{{ latest.light_digital }}{% else %}—{% endif %}</span><span class="unit" id="live-light-unit">{% if latest and latest.light_unit == 'digital' %}(디지털){% else %}lux{% endif %}</span></div>
+                <div class="sub" id="live-light-note"></div>
             </div>
         </div>
     </section>
@@ -826,7 +1013,8 @@
             </div>
             <div class="card light">
                 <div class="label">조도 평균</div>
-                <div class="value"><span id="avg-light">…</span><span class="unit">lux</span></div>
+                <div class="value"><span id="avg-light">…</span><span class="unit" id="avg-light-unit">lux</span></div>
+                <div class="sub" id="avg-light-sub"></div>
             </div>
         </div>
     </section>
@@ -856,7 +1044,7 @@
                 <canvas id="soilChart"></canvas>
             </div>
             <div class="chart-card">
-                <div class="chart-card-title">조도 (lux)</div>
+                <div class="chart-card-title" id="light-chart-title">조도 (lux)</div>
                 <canvas id="lightChart"></canvas>
             </div>
         </div>
@@ -914,10 +1102,10 @@
         </div>
     </section>
 
-    <!-- ── 자동 관수 감지 ── -->
+    <!-- ── 센서 기반 관수 추정 ── -->
     <section>
         <div class="section-header">
-            <div class="section-title">최근 자동 관수 감지</div>
+            <div class="section-title">최근 관수 추정 기록</div>
             <div style="font-size:0.72rem;color:#475569;">토양수분 급상승을 서버에서 자동 분석</div>
         </div>
         <div class="table-wrap compact-table-wrap">
@@ -938,6 +1126,49 @@
         </div>
     </section>
 
+    <!-- ── 사용자 작업 기록 ── -->
+    <section id="work-log-card">
+        <div class="section-header">
+            <div class="section-title">재배 작업 기록</div>
+            <div style="font-size:0.72rem;color:#475569;">기록 시점은 센서 차트에 보라색 선으로 표시됩니다</div>
+        </div>
+        <form class="crop-form-grid" id="work-log-form"
+              onsubmit="event.preventDefault(); saveWorkLog();">
+            <label class="crop-form-field">
+                <span class="crop-form-label">작업 종류</span>
+                <select id="work-log-type" class="crop-form-input" required>
+                    <option value="watering">급수</option>
+                    <option value="ventilation">환기</option>
+                    <option value="fertilizing">비료 투입</option>
+                    <option value="inspection">작물 점검</option>
+                    <option value="sensor_maintenance">센서 점검</option>
+                    <option value="other">기타</option>
+                </select>
+            </label>
+            <label class="crop-form-field">
+                <span class="crop-form-label">작업 시각</span>
+                <input id="work-log-time" class="crop-form-input" type="datetime-local">
+            </label>
+            <label class="crop-form-field" style="grid-column:1/-1">
+                <span class="crop-form-label">메모</span>
+                <textarea id="work-log-note" class="crop-form-textarea" maxlength="500"
+                          placeholder="예: 화분당 물 300mL, 센서 위치 조정"></textarea>
+            </label>
+            <div class="growth-actions" style="grid-column:1/-1">
+                <button class="btn btn-primary" type="submit">작업 기록 저장</button>
+                <span id="work-log-message" class="growth-message"></span>
+            </div>
+        </form>
+        <div class="table-wrap compact-table-wrap" style="margin-top:14px">
+            <table>
+                <thead><tr><th>작업 시각</th><th>종류</th><th>메모</th><th></th></tr></thead>
+                <tbody id="work-log-tbody">
+                    <tr><td colspan="4" style="text-align:center;color:#475569;padding:28px;">불러오는 중…</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+
     <!-- ── 전체 기록 ── -->
     <section>
         <div class="section-header">
@@ -949,6 +1180,9 @@
                 <input type="time" id="filter-to" title="종료 시간">
                 <button class="btn btn-primary" onclick="searchHistory()">검색</button>
                 <button class="btn btn-ghost"    onclick="clearFilters()">초기화</button>
+                <button class="btn btn-ghost" id="export-sensor-btn" type="button"
+                        onclick="exportSensorCsv()"
+                        title="현재 검색 조건 그대로 CSV로 내려받습니다">⬇ CSV</button>
             </div>
         </div>
         <div class="table-wrap">
@@ -970,6 +1204,60 @@
             </table>
         </div>
         <div class="pagination" id="pagination"></div>
+    </section>
+
+    <!-- ── 알림 기록 ── -->
+    <section>
+        <div class="section-header">
+            <div class="section-title">
+                알림 기록 (<span id="events-total">0</span>건)
+                <span id="events-active" class="event-count-badge" style="display:none"></span>
+            </div>
+            <div class="history-filters">
+                <div class="toggle-group">
+                    <button id="events-btn-all"       class="active" onclick="setEventStatus('',          this)">전체</button>
+                    <button id="events-btn-abnormal"                 onclick="setEventStatus('abnormal',  this)">이상</button>
+                    <button id="events-btn-recovered"                onclick="setEventStatus('recovered', this)">복구</button>
+                </div>
+                <button class="btn btn-ghost" id="export-events-btn" type="button"
+                        onclick="exportEventsCsv()"
+                        title="현재 필터 그대로 CSV로 내려받습니다">⬇ CSV</button>
+            </div>
+        </div>
+        <div class="history-filters event-filters">
+            <select id="events-filter-metric" title="알림 항목">
+                <option value="">전체 항목</option>
+                <option value="temperature">온도</option>
+                <option value="humidity">습도</option>
+                <option value="soil_moisture">토양수분</option>
+                <option value="light">조도</option>
+                <option value="device">장치 연결</option>
+            </select>
+            <input type="date" id="events-filter-date" title="날짜 선택">
+            <input type="time" id="events-filter-from" title="시작 시간">
+            <span class="sep">~</span>
+            <input type="time" id="events-filter-to" title="종료 시간">
+            <button class="btn btn-primary" onclick="searchEvents()">검색</button>
+            <button class="btn btn-ghost" onclick="clearEventFilters()">초기화</button>
+        </div>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>발생 시각</th>
+                        <th>디바이스</th>
+                        <th>항목</th>
+                        <th>상태</th>
+                        <th>측정값</th>
+                        <th>기준 범위</th>
+                    </tr>
+                </thead>
+                <tbody id="events-tbody">
+                    <tr><td colspan="6" style="text-align:center;color:#475569;padding:28px;">불러오는 중…</td></tr>
+                </tbody>
+            </table>
+        </div>
+        <div class="pagination" id="events-pagination"></div>
     </section>
 
 </div><!-- /container -->
@@ -1099,9 +1387,112 @@
         <form id="threshold-form" onsubmit="event.preventDefault(); saveThresholds(SELECTED_DEVICE_ID);">
             <div class="threshold-actions">
                 <button class="btn btn-primary" id="threshold-save-btn" type="submit">저장</button>
+                <button class="btn btn-ghost" id="crop-apply-btn" type="button"
+                        onclick="applyCropThresholds()"
+                        title="선택한 작물의 권장 범위를 이 장치의 임계값으로 저장합니다">작물 기준 적용</button>
             </div>
             <div class="threshold-message" id="threshold-message"></div>
+            <!-- 작물 권장 범위와 실제 저장된 임계값이 같은지 표시한다.
+                 둘이 다르면 화면 가이드와 ESP32 LED 판단 기준이 어긋난 상태다. -->
+            <div class="threshold-sync" id="threshold-sync-note"></div>
         </form>
+    </div>
+
+    <!-- ── 알림 설정 ── -->
+    <div class="guide-card" id="alert-settings-card">
+        <div class="guide-lbl">알림 설정</div>
+        <div class="threshold-device">
+            대상: <span id="alert-settings-scope">전체 기본값</span>
+        </div>
+        <div id="alert-toggle-list">
+            <div class="setting-hint">불러오는 중…</div>
+        </div>
+        <div class="threshold-field" style="margin-top:8px">
+            <label for="alert-cooldown">재알림 간격(분)</label>
+            <input id="alert-cooldown" class="setting-input" type="number"
+                   min="0" max="1440" step="1" inputmode="numeric" placeholder="예: 10">
+        </div>
+        <div class="threshold-field" style="margin-top:8px">
+            <label for="alert-abnormal-count">이상 확정 연속 횟수</label>
+            <input id="alert-abnormal-count" class="setting-input" type="number"
+                   min="1" max="100" step="1" inputmode="numeric">
+        </div>
+        <div class="threshold-field" style="margin-top:8px">
+            <label for="alert-duration">이상 지속 시간(초)</label>
+            <input id="alert-duration" class="setting-input" type="number"
+                   min="0" max="86400" step="1" inputmode="numeric">
+        </div>
+        <div class="threshold-field" style="margin-top:8px">
+            <label for="alert-recovery-count">복구 확정 연속 횟수</label>
+            <input id="alert-recovery-count" class="setting-input" type="number"
+                   min="1" max="100" step="1" inputmode="numeric">
+        </div>
+        <div class="threshold-field" style="margin-top:8px">
+            <label for="alert-danger-percent">위험 판정 이탈률(정상 범위 폭 대비 %)</label>
+            <input id="alert-danger-percent" class="setting-input" type="number"
+                   min="0" max="1000" step="1" inputmode="numeric">
+        </div>
+        <div class="setting-row">
+            <label for="alert-danger-immediate">위험 단계는 즉시 알림</label>
+            <input id="alert-danger-immediate" type="checkbox">
+        </div>
+        <div class="setting-hint" style="margin-top:10px">정기 Discord 요약</div>
+        <div class="setting-row">
+            <label for="alert-daily-summary">일간 요약</label>
+            <input id="alert-daily-summary" type="checkbox">
+        </div>
+        <div class="setting-row">
+            <label for="alert-weekly-summary">주간 요약</label>
+            <input id="alert-weekly-summary" type="checkbox">
+        </div>
+        <div class="threshold-field" style="margin-top:8px">
+            <label for="alert-summary-hour">발송 시각(0~23시)</label>
+            <input id="alert-summary-hour" class="setting-input" type="number"
+                   min="0" max="23" step="1" inputmode="numeric">
+        </div>
+        <div class="threshold-field" style="margin-top:8px">
+            <label for="alert-summary-weekday">주간 요약 요일</label>
+            <select id="alert-summary-weekday" class="setting-input">
+                <option value="0">월요일</option><option value="1">화요일</option>
+                <option value="2">수요일</option><option value="3">목요일</option>
+                <option value="4">금요일</option><option value="5">토요일</option>
+                <option value="6">일요일</option>
+            </select>
+        </div>
+        <div class="threshold-field" style="margin-top:8px">
+            <label for="alert-webhook">Discord Webhook URL</label>
+            <input id="alert-webhook" class="setting-input" type="url"
+                   placeholder="비우면 서버 환경변수를 사용합니다">
+            <label class="setting-hint" style="display:block;margin-top:6px">
+                <input id="alert-webhook-clear" type="checkbox">
+                저장된 장치별 웹훅 제거
+            </label>
+        </div>
+        <div class="threshold-actions" style="margin-top:10px">
+            <button class="btn btn-primary" type="button" onclick="saveAlertSettings()">저장</button>
+            <button class="btn btn-ghost" id="alert-reset-btn" type="button"
+                    onclick="resetAlertSettings()"
+                    title="이 장치의 예외 설정을 지우고 전체 기본값을 따릅니다">기본값으로</button>
+        </div>
+        <div class="threshold-message" id="alert-settings-message"></div>
+        <div class="setting-hint" id="alert-settings-source"></div>
+    </div>
+
+    <!-- ── 저장 현황 / 보존 정책 ── -->
+    <div class="guide-card" id="storage-card">
+        <div class="guide-lbl">저장 현황</div>
+        <div class="storage-stat">원시 데이터 <b id="storage-raw">—</b></div>
+        <div class="storage-stat">시간별 집계 <b id="storage-hourly">—</b></div>
+        <div class="storage-stat">DB 크기 <b id="storage-size">—</b></div>
+        <div class="storage-stat">가장 오래된 기록 <b id="storage-oldest">—</b></div>
+        <div class="threshold-actions" style="margin-top:10px">
+            <button class="btn btn-ghost" type="button" onclick="runRollup()"
+                    title="삭제 없이 시간별 집계만 수행합니다">집계</button>
+            <button class="btn btn-ghost" type="button" onclick="runRetention()"
+                    title="집계 후 보존 기간이 지난 원시 데이터를 삭제합니다">정리</button>
+        </div>
+        <div class="threshold-message" id="storage-message"></div>
+        <div class="setting-hint" id="storage-policy"></div>
     </div>
 
     <!-- 재배 팁 (JS가 동적으로 채운다) -->
@@ -1138,6 +1529,7 @@ async function fetchJson(key, url) {
         const res = await fetch(url, { signal: controller.signal });
         const data = await res.json();
         if (!res.ok) {
+            if (res.status === 401) openAuthModal();
             throw new Error(data?.error || `Request failed (${res.status})`);
         }
         return data;
@@ -1256,10 +1648,110 @@ async function loadThresholds(deviceId) {
         }
 
         fillThresholdInputs(data);
+        _savedThresholds = data;
+        updateThresholdSyncNote();
         setThresholdMessage('현재 저장된 임계값을 불러왔습니다.', 'ok');
     } catch (e) {
         console.error('Threshold load failed:', e);
         setThresholdMessage(e.message || '임계값을 불러오지 못했습니다.', 'error');
+    }
+}
+
+// ── 작물 권장 범위 ↔ 장치 임계값 동기화 ──────────────────
+// 대시보드 가이드/차트 기준선은 "작물 권장 범위"를, ESP32 LED와 Discord 알림은
+// "장치 임계값"을 사용한다. 둘은 서로 다른 테이블의 값이라 어긋날 수 있는데,
+// 예전에는 그 사실이 화면에 전혀 드러나지 않아 작물만 바꾸고 기준이 바뀌었다고
+// 오해하기 쉬웠다. 아래 두 함수가 그 차이를 드러내고 좁힌다.
+
+// 임계값 필드명과 작물 프로필 필드명이 같으므로 그대로 비교한다.
+const CROP_THRESHOLD_FIELDS = [
+    'temperature_min', 'temperature_max',
+    'humidity_min', 'humidity_max',
+    'soil_moisture_min', 'soil_moisture_max',
+    'light_min', 'light_max',
+];
+
+function updateThresholdSyncNote() {
+    const el = document.getElementById('threshold-sync-note');
+    const btn = document.getElementById('crop-apply-btn');
+    if (!el) return;
+
+    if (!SELECTED_DEVICE_ID) {
+        el.textContent = '';
+        el.className = 'threshold-sync';
+        if (btn) btn.disabled = true;
+        return;
+    }
+    if (btn) btn.disabled = false;
+
+    if (!_activeCrop || !_savedThresholds) {
+        el.textContent = '';
+        el.className = 'threshold-sync';
+        return;
+    }
+
+    const differing = CROP_THRESHOLD_FIELDS.filter(
+        field => Number(_activeCrop[field]) !== Number(_savedThresholds[field])
+    );
+
+    if (differing.length === 0) {
+        el.textContent = `✓ 임계값이 '${_activeCrop.name}' 권장 범위와 일치합니다.`;
+        el.className = 'threshold-sync same';
+        return;
+    }
+
+    // 조도만 다른 경우는 디지털 조도 센서라 의도적으로 다를 수 있어 문구를 구분한다.
+    const onlyLight = differing.every(field => field.startsWith('light_'));
+    el.textContent = onlyLight
+        ? `⚠ 조도 기준이 '${_activeCrop.name}' 권장 범위와 다릅니다. 디지털 조도 센서면 정상입니다.`
+        : `⚠ 현재 임계값이 '${_activeCrop.name}' 권장 범위와 다릅니다. ESP32는 위 임계값으로 판단합니다.`;
+    el.className = 'threshold-sync diff';
+}
+
+async function applyCropThresholds() {
+    // 선택된 작물의 권장 범위를 서버에서 그대로 임계값 테이블에 복사한다.
+    // 브라우저에서 입력창만 채우고 끝내지 않고 서버 API를 쓰는 이유는,
+    // 저장이 한 번에 확정되어야 ESP32가 다음 조회에서 반드시 같은 값을 받기 때문이다.
+    if (!SELECTED_DEVICE_ID) {
+        setThresholdMessage('장치를 먼저 선택하세요.', 'error');
+        return;
+    }
+    if (!_activeCrop) {
+        setThresholdMessage('작물을 먼저 선택하세요.', 'error');
+        return;
+    }
+    if (!confirm(`'${_activeCrop.name}'의 권장 범위를 ${SELECTED_DEVICE_ID}의 임계값으로 저장할까요?\n\nESP32의 LED 판단과 Discord 알림 기준이 함께 바뀝니다.`)) {
+        return;
+    }
+
+    const btn = document.getElementById('crop-apply-btn');
+    if (btn) btn.disabled = true;
+    setThresholdMessage('작물 기준을 적용하는 중...');
+
+    try {
+        const res = await fetch('/api/thresholds/from-crop', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ device_id: SELECTED_DEVICE_ID, crop_id: _activeCrop.id }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '작물 기준 적용에 실패했습니다.');
+
+        fillThresholdInputs(data.thresholds);
+        _savedThresholds = data.thresholds;
+        updateThresholdSyncNote();
+
+        setThresholdMessage(
+            data.light_unit_mismatch
+                ? '적용했습니다. 디지털 조도는 lux와 비교하지 않도록 안전 범위(0~1)를 사용합니다.'
+                : '작물 기준을 임계값으로 저장했습니다.',
+            data.light_unit_mismatch ? '' : 'ok',
+        );
+    } catch (e) {
+        console.error('Apply crop thresholds failed:', e);
+        setThresholdMessage(e.message || '작물 기준 적용에 실패했습니다.', 'error');
+    } finally {
+        if (btn) btn.disabled = false;
     }
 }
 
@@ -1344,6 +1836,8 @@ async function saveThresholds(deviceId) {
         }
 
         fillThresholdInputs(data);
+        _savedThresholds = data;
+        updateThresholdSyncNote();
         setThresholdMessage('임계값이 저장되었습니다.', 'ok');
     } catch (e) {
         console.error('Threshold save failed:', e);
@@ -1359,11 +1853,13 @@ let currentChartPeriod = 'hourly';
 let _allCrops          = [];   // 서버에서 받은 전체 작물 목록
 let _activeCrop        = null; // 현재 패널에 표시 중인 작물
 let _lastSensorData    = null; // 작물 변경 시 패널 즉시 갱신에 사용
+let _savedThresholds   = null; // 서버에 저장된 장치 임계값(작물 권장 범위와 비교용)
+let _lightUnit         = null; // 최신 row의 조도 단위. lux인지 digital인지에 따라 표시가 달라진다.
 
 // ── Basil reference data ─────────────────────────────────
 // 우측 재배 가이드와 상태 배지는 이 기준값으로 현재 센서값을 판단한다.
-// 서버에서 장치별 임계값을 불러오면 applyThresholdsToGuide()가 이 값을 덮어써
-// 대시보드 표시와 실제 ESP32 LED 판단 기준을 맞춘다.
+// 이 값은 선택된 작물 프로필에서 오며(applyCropToPanel), 장치 임계값과는 별개다.
+// 둘이 어긋났는지는 updateThresholdSyncNote()가 임계값 패널에 표시한다.
 const BASIL = {
     temperature:   { min: 18,   max: 27,   scaleMax: 40,    unit: '°C'  },
     humidity:      { min: 40,   max: 70,   scaleMax: 100,   unit: '%'   },
@@ -1371,14 +1867,41 @@ const BASIL = {
     light:         { min: 2000, max: 8000, scaleMax: 12000, unit: 'lux' },
 };
 
-// 서버 임계값 필드명과 화면 가이드 항목명을 연결한다.
-// 예: temperature_min/max는 BASIL.temperature의 min/max에 적용된다.
-const THRESHOLD_GUIDE_KEYS = {
-    temperature: ['temperature_min', 'temperature_max'],
-    humidity: ['humidity_min', 'humidity_max'],
-    soil_moisture: ['soil_moisture_min', 'soil_moisture_max'],
-    light: ['light_min', 'light_max'],
-};
+// ── 조도 단위 처리 ────────────────────────────────────────
+// light 컬럼에는 조도계의 lux 값이 들어올 수도, LM393류 비교기의 0/1이 들어올 수도 있다.
+// 두 값을 같은 방식으로 표시하면 "3,000 lux"와 "1 lux"가 나란히 놓여 오해를 부른다.
+// 서버가 함께 내려주는 light_unit으로 표시 방법을 나눈다.
+const LIGHT_UNIT_DIGITAL = 'digital';
+
+function isDigitalLight() {
+    return _lightUnit === LIGHT_UNIT_DIGITAL;
+}
+
+function formatLightValue(raw) {
+    // 디지털 센서는 숫자 자체에 밝기 의미가 없다.
+    // 모듈에 따라 극성이 반대인 경우가 있어 원시값은 카드 하단에 따로 남긴다.
+    if (raw == null || raw === '—') return '—';
+    if (!isDigitalLight()) return raw;
+    const n = Number(raw);
+    if (!Number.isFinite(n)) return raw;
+    return n === 0 ? '밝음' : '어두움';
+}
+
+function updateLightUnitDisplay() {
+    const digital = isDigitalLight();
+
+    const unitEl = document.getElementById('live-light-unit');
+    if (unitEl) unitEl.textContent = digital ? '' : 'lux';
+
+    const noteEl = document.getElementById('live-light-note');
+    if (noteEl) {
+        const raw = _lastSensorData?.light ?? _lastSensorData?.light_digital;
+        noteEl.textContent = digital ? `디지털 조도 센서 (원시값 ${raw ?? '—'})` : '';
+    }
+
+    // 가이드 패널의 조도 단위 표기도 함께 맞춘다.
+    BASIL.light.unit = digital ? '' : 'lux';
+}
 
 function formatGuideNumber(value) {
     // 적정 범위 표시에서 2000을 2,000처럼 읽기 좋게 보여주고,
@@ -1402,27 +1925,13 @@ function updateGuideRangeVisual(key) {
     }
 }
 
-function applyThresholdsToGuide(data) {
-    // 서버에서 받은 장치별 임계값을 대시보드 가이드 기준값에 반영한다.
-    // 사용자가 저장한 값이 화면의 상태 배지와 그래프 기준선 판단에 즉시 영향을 주게 하기 위한 단계다.
-    if (!data) return;
-
-    for (const [key, [minField, maxField]] of Object.entries(THRESHOLD_GUIDE_KEYS)) {
-        const min = Number(data[minField]);
-        const max = Number(data[maxField]);
-        if (!Number.isFinite(min) || !Number.isFinite(max)) continue;
-
-        BASIL[key].min = min;
-        BASIL[key].max = max;
-        const scaleFloor = key === 'temperature' ? 40 : 100;
-        BASIL[key].scaleMax = Math.max(scaleFloor, max, 1);
-        updateGuideRangeVisual(key);
-    }
-}
-
 function basilStatus(key, raw) {
     // 현재 센서값을 적정/주의/위험 세 단계로 분류한다.
     // 적정 범위 안이면 OK, 범위에서 20% 정도 벗어난 값은 주의, 그 이상은 위험으로 표시한다.
+    // 디지털 조도(0/1)는 lux 권장 범위와 비교할 수 없어 판정 대상에서 제외한다.
+    if (key === 'light' && isDigitalLight()) {
+        return { text: '측정 방식 다름', cls: 'status-unknown' };
+    }
     if (raw == null || raw === '—') return { text: '—', cls: 'status-unknown' };
     const v = parseFloat(raw);
     if (isNaN(v)) return { text: '—', cls: 'status-unknown' };
@@ -1447,7 +1956,7 @@ function updateBasilPanel(d) {
         const s = basilStatus(key, raw);
 
         const valEl = document.getElementById(`gval-${key}`);
-        if (valEl) valEl.textContent = raw;
+        if (valEl) valEl.textContent = key === 'light' ? formatLightValue(raw) : raw;
 
         const sEl = document.getElementById(`gstatus-${key}`);
         if (sEl) { sEl.textContent = s.text; sEl.className = `status-badge ${s.cls}`; }
@@ -1458,7 +1967,13 @@ function updateBasilPanel(d) {
             zone.style.left  = `${(min / scaleMax * 100).toFixed(1)}%`;
             zone.style.width = `${((max - min) / scaleMax * 100).toFixed(1)}%`;
         }
+
+        // 디지털 조도는 막대 위 점 위치가 아무 의미도 갖지 않으므로 감춘다.
         const dot = document.getElementById(`gdot-${key}`);
+        if (dot && key === 'light' && isDigitalLight()) {
+            dot.style.display = 'none';
+            continue;
+        }
         if (dot && raw !== '—') {
             const v = parseFloat(raw);
             dot.style.left    = `${Math.max(0, Math.min(100, v / scaleMax * 100)).toFixed(1)}%`;
@@ -1779,7 +2294,7 @@ async function submitGrowthRecord(event) {
 function renderWateringEvents(events) {
     const tbody = document.getElementById('watering-tbody');
     if (!events.length) {
-        renderEmptyTable('watering-tbody', 5, '자동 감지된 관수 이벤트가 없습니다.');
+        renderEmptyTable('watering-tbody', 5, '센서값으로 추정된 관수 기록이 없습니다.');
         return;
     }
 
@@ -1799,7 +2314,7 @@ function renderWateringEvents(events) {
 
 async function loadWateringEvents() {
     if (!SELECTED_DEVICE_ID) {
-        renderEmptyTable('watering-tbody', 5, '장치를 선택하면 자동 관수 감지를 볼 수 있습니다.');
+        renderEmptyTable('watering-tbody', 5, '장치를 선택하면 센서 기반 관수 추정 기록을 볼 수 있습니다.');
         return;
     }
     try {
@@ -1812,6 +2327,137 @@ async function loadWateringEvents() {
     }
 }
 
+// ── 사용자 작업 기록 ─────────────────────────────────────
+let _workLogs = [];
+
+function setWorkLogMessage(text, kind = '') {
+    const el = document.getElementById('work-log-message');
+    if (!el) return;
+    el.textContent = text;
+    el.className = `growth-message${kind ? ` ${kind}` : ''}`;
+}
+
+function renderWorkLogs(items) {
+    const tbody = document.getElementById('work-log-tbody');
+    if (!tbody) return;
+    if (!items.length) {
+        renderEmptyTable('work-log-tbody', 4, SELECTED_DEVICE_ID
+            ? '등록된 작업 기록이 없습니다.' : '장치를 선택하면 작업 기록을 볼 수 있습니다.');
+        return;
+    }
+    tbody.textContent = '';
+    for (const item of items) {
+        const row = document.createElement('tr');
+        appendTextCell(row, item.occurred_at ?? '—');
+        appendTextCell(row, item.work_type_label ?? item.work_type);
+        appendTextCell(row, item.note || '—');
+        const action = document.createElement('td');
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'btn btn-ghost';
+        button.textContent = '삭제';
+        button.onclick = () => deleteWorkLog(item.id);
+        action.appendChild(button);
+        row.appendChild(action);
+        tbody.appendChild(row);
+    }
+}
+
+async function loadWorkLogs() {
+    if (!SELECTED_DEVICE_ID) {
+        _workLogs = [];
+        renderWorkLogs([]);
+        updateChartAnnotations();
+        return;
+    }
+    try {
+        const data = await fetchJson('work-logs', apiUrl('/api/work-logs', { limit: 200 }));
+        if (data === undefined) return;
+        _workLogs = data.items ?? [];
+        renderWorkLogs(_workLogs);
+        updateChartAnnotations();
+    } catch (error) {
+        console.error('Work log load failed:', error);
+        renderEmptyTable('work-log-tbody', 4, '작업 기록을 불러오지 못했습니다.');
+    }
+}
+
+async function saveWorkLog() {
+    if (!SELECTED_DEVICE_ID) {
+        setWorkLogMessage('먼저 장치를 선택하세요.', 'error');
+        return;
+    }
+    const occurred = document.getElementById('work-log-time')?.value || null;
+    const payload = {
+        device_id: SELECTED_DEVICE_ID,
+        work_type: document.getElementById('work-log-type')?.value,
+        note: document.getElementById('work-log-note')?.value ?? '',
+        occurred_at: occurred,
+    };
+    setWorkLogMessage('저장 중...');
+    try {
+        const response = await fetch('/api/work-logs', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || '저장에 실패했습니다.');
+        document.getElementById('work-log-note').value = '';
+        setWorkLogMessage('작업 기록을 저장했습니다.', 'ok');
+        await loadWorkLogs();
+    } catch (error) {
+        setWorkLogMessage(error.message || '저장에 실패했습니다.', 'error');
+    }
+}
+
+async function deleteWorkLog(id) {
+    if (!confirm('이 작업 기록을 삭제할까요?')) return;
+    const response = await fetch(`/api/work-logs/${id}`, { method: 'DELETE' });
+    if (!response.ok) {
+        setWorkLogMessage('작업 기록을 삭제하지 못했습니다.', 'error');
+        return;
+    }
+    setWorkLogMessage('작업 기록을 삭제했습니다.', 'ok');
+    await loadWorkLogs();
+}
+
+function workLogChartLabel(item, period) {
+    const date = new Date(String(item.occurred_at).replace(' ', 'T'));
+    if (Number.isNaN(date.getTime())) return null;
+    const mm = String(date.getMonth() + 1).padStart(2, '0');
+    const dd = String(date.getDate()).padStart(2, '0');
+    const hh = String(date.getHours()).padStart(2, '0');
+    if (period === 'hourly') return `${mm}/${dd} ${hh}:00`;
+    if (period === 'daily') return `${mm}/${dd}`;
+    if (period === 'weekly') {
+        const monday = new Date(date);
+        monday.setDate(date.getDate() - ((date.getDay() + 6) % 7));
+        return `${String(monday.getMonth() + 1).padStart(2, '0')}/${String(monday.getDate()).padStart(2, '0')}~`;
+    }
+    return `${date.getFullYear()}/${mm}`;
+}
+
+function makeWorkAnnotations(labels) {
+    const annotations = {};
+    for (const item of _workLogs.slice(0, 40)) {
+        const label = workLogChartLabel(item, currentChartPeriod);
+        if (!label || !labels.includes(label)) continue;
+        annotations[`work-${item.id}`] = {
+            type: 'line', xMin: label, xMax: label,
+            borderColor: '#a78bfa', borderWidth: 2, borderDash: [3, 3],
+            label: {
+                display: true,
+                content: item.work_type_label,
+                position: 'start',
+                backgroundColor: '#7c3aed', color: '#fff',
+                font: { size: 9, weight: '600' }, padding: 3,
+            },
+        };
+    }
+    return annotations;
+}
+
 // ── Crop profile functions ────────────────────────────────
 
 function updateGuideNotes(notes) {
@@ -1822,7 +2468,13 @@ function updateGuideNotes(notes) {
         el.innerHTML = '<div class="guide-note" style="color:#475569">등록된 재배 팁이 없습니다.</div>';
         return;
     }
-    el.innerHTML = notes.map(note => `<div class="guide-note">${note}</div>`).join('');
+    el.textContent = '';
+    for (const note of notes) {
+        const row = document.createElement('div');
+        row.className = 'guide-note';
+        row.textContent = String(note);
+        el.appendChild(row);
+    }
 }
 
 function updateChartAnnotations() {
@@ -1831,6 +2483,7 @@ function updateChartAnnotations() {
         chart.options.plugins.annotation.annotations = {
             minRef: makeHLine(min, '#4ade80', `최소 ${formatGuideNumber(min)}${unit}`),
             maxRef: makeHLine(max, '#f97316', `최대 ${formatGuideNumber(max)}${unit}`),
+            ...makeWorkAnnotations(chart.data.labels),
         };
         chart.update('none');
     };
@@ -1865,12 +2518,20 @@ function applyCropToPanel(crop) {
     updateGuideNotes(crop.notes || []);
     updateChartAnnotations();
     if (_lastSensorData !== null) updateBasilPanel(_lastSensorData);
+    // 작물이 바뀌면 저장된 임계값과의 일치 여부도 다시 판단해야 한다.
+    updateThresholdSyncNote();
 }
 
 function renderCropSelect(crops) {
     const sel = document.getElementById('crop-panel-select');
     if (!sel) return;
-    sel.innerHTML = crops.map(c => `<option value="${c.id}">${c.name}</option>`).join('');
+    sel.textContent = '';
+    for (const crop of crops) {
+        const option = document.createElement('option');
+        option.value = String(crop.id);
+        option.textContent = crop.name;
+        sel.appendChild(option);
+    }
 }
 
 async function loadActiveCrop() {
@@ -1946,14 +2607,31 @@ function renderModalCropList(crops) {
         el.innerHTML = '<div style="color:#475569;font-size:0.84rem">등록된 작물이 없습니다.</div>';
         return;
     }
-    el.innerHTML = crops.map(c => `
-        <div class="crop-list-item">
-            <span class="crop-list-name">${c.name}</span>
-            <div class="crop-list-actions">
-                <button class="btn btn-ghost btn-xs" onclick="showCropForm(${c.id})">수정</button>
-                <button class="btn btn-danger btn-xs" onclick="confirmDeleteCrop(${c.id}, '${c.name}')">삭제</button>
-            </div>
-        </div>`).join('');
+    el.textContent = '';
+    for (const crop of crops) {
+        const row = document.createElement('div');
+        row.className = 'crop-list-item';
+
+        const name = document.createElement('span');
+        name.className = 'crop-list-name';
+        name.textContent = crop.name;
+        row.appendChild(name);
+
+        const actions = document.createElement('div');
+        actions.className = 'crop-list-actions';
+        const edit = document.createElement('button');
+        edit.className = 'btn btn-ghost btn-xs';
+        edit.textContent = '수정';
+        edit.addEventListener('click', () => showCropForm(crop.id));
+        actions.appendChild(edit);
+        const remove = document.createElement('button');
+        remove.className = 'btn btn-danger btn-xs';
+        remove.textContent = '삭제';
+        remove.addEventListener('click', () => confirmDeleteCrop(crop.id, crop.name));
+        actions.appendChild(remove);
+        row.appendChild(actions);
+        el.appendChild(row);
+    }
 }
 
 function showCropForm(cropId) {
@@ -2087,14 +2765,20 @@ async function refreshLatest() {
         if (d === undefined) return;
 
         const val = (key, alt) => d?.[key] ?? (alt ? d?.[alt] : null) ?? '—';
+        _lastSensorData = d;
+        // 조도 단위를 먼저 확정해야 아래 표시와 가이드 판정이 같은 기준을 쓴다.
+        _lightUnit = d?.light_unit ?? null;
+
         document.getElementById('live-temp').textContent  = d ? val('temperature') : '—';
         document.getElementById('live-hum').textContent   = d ? val('humidity') : '—';
         document.getElementById('live-soil').textContent  = d ? val('soil_moisture') : '—';
         document.getElementById('live-soil-raw').textContent = d ? val('soil_raw') : '—';
-        document.getElementById('live-light').textContent = d ? val('light', 'light_digital') : '—';
+        document.getElementById('live-light').textContent =
+            d ? formatLightValue(val('light', 'light_digital')) : '—';
         document.getElementById('live-time').textContent  =
             d ? (d.server_received_at ?? d.time ?? d.timestamp ?? '—') : '—';
-        _lastSensorData = d;
+
+        updateLightUnitDisplay();
         updateSoilCalibrationButtons();
         updateBasilPanel(d);
     } catch (e) {
@@ -2110,6 +2794,15 @@ async function loadCharts(period) {
         const data = await fetchJson('chart', apiUrl('/api/dashboard/chart', { period }));
         if (data === undefined) return;
         const numPred = PREDICT_COUNTS[period] ?? 3;
+
+        const lightTitle = document.getElementById('light-chart-title');
+        if (lightTitle) {
+            lightTitle.textContent = data.light_mode === 'mixed'
+                ? '조도 (lux 장치만 · 디지털 제외)'
+                : data.light_mode === 'digital'
+                    ? '조도 (디지털 센서 · lux 차트 없음)'
+                    : '조도 (lux)';
+        }
 
         for (const [name, key] of CHART_KEYS) {
             const values      = data[key]    ?? [];
@@ -2136,6 +2829,8 @@ async function loadCharts(period) {
 
             charts[name].update('active');
         }
+        // 새 x축 레이블을 기준으로 작업 기록 세로선을 다시 배치한다.
+        updateChartAnnotations();
     } catch (e) {
         console.error('Chart load failed:', e);
     }
@@ -2164,6 +2859,19 @@ async function loadAverages(period) {
         document.getElementById('avg-hum').textContent   = d.humidity      ?? '—';
         document.getElementById('avg-soil').textContent  = d.soil_moisture ?? '—';
         document.getElementById('avg-light').textContent = d.light         ?? '—';
+
+        const lightUnit = document.getElementById('avg-light-unit');
+        const lightSub = document.getElementById('avg-light-sub');
+        if (lightUnit) lightUnit.textContent = d.light == null ? '' : 'lux';
+        if (lightSub) {
+            if (d.light_mode === 'mixed') {
+                lightSub.textContent = `lux ${d.light_count}건만 집계 · 디지털 ${d.digital_light_count}건 제외`;
+            } else if (d.light_mode === 'digital') {
+                lightSub.textContent = `디지털 조도 ${d.digital_light_count}건 · 평균 미제공`;
+            } else {
+                lightSub.textContent = d.light_count ? `lux ${d.light_count}건` : '';
+            }
+        }
 
         const sub = document.getElementById('avg-temp-sub');
         if (sub) sub.textContent = `${AVG_PERIOD_LABELS[period] ?? period} · ${d.count}건`;
@@ -2236,16 +2944,18 @@ function renderHistoryTable(items, page, perPage) {
     const val  = (row, key, alt) => row[key] ?? (alt ? row[alt] : null) ?? '—';
     const time = (row) => row.server_received_at ?? row.time ?? row.timestamp ?? '—';
 
-    tbody.innerHTML = items.map((row, i) => `
-        <tr>
-            <td style="color:#475569">${offset + i + 1}</td>
-            <td>${time(row)}</td>
-            <td>${row.device_id ?? 'legacy'}</td>
-            <td class="temp-val">${val(row, 'temperature')}</td>
-            <td class="hum-val">${val(row, 'humidity')}</td>
-            <td class="soil-val">${val(row, 'soil_moisture')}</td>
-            <td class="light-val">${val(row, 'light', 'light_digital')}</td>
-        </tr>`).join('');
+    tbody.textContent = '';
+    for (const [i, row] of items.entries()) {
+        const tr = document.createElement('tr');
+        appendTextCell(tr, offset + i + 1).style.color = '#475569';
+        appendTextCell(tr, time(row));
+        appendTextCell(tr, row.device_id ?? 'legacy');
+        appendTextCell(tr, val(row, 'temperature'), 'temp-val');
+        appendTextCell(tr, val(row, 'humidity'), 'hum-val');
+        appendTextCell(tr, val(row, 'soil_moisture'), 'soil-val');
+        appendTextCell(tr, val(row, 'light', 'light_digital'), 'light-val');
+        tbody.appendChild(tr);
+    }
 }
 
 function renderPagination(page, pages, total) {
@@ -2332,9 +3042,764 @@ async function refreshDeviceOptions() {
         const data = await fetchJson('devices', apiUrl('/api/dashboard/devices'));
         if (data === undefined) return;
         syncDeviceOptions(data.devices ?? []);
+        applyDeviceLabels();
     } catch (e) {
         console.error('Device list refresh failed:', e);
     }
+}
+
+function applyDeviceLabels() {
+    // 드롭다운의 표시 텍스트만 별칭으로 바꾼다.
+    // option의 value는 그대로 device_id여야 기존 필터 링크가 모두 유지된다.
+    const select = document.getElementById('device-select');
+    if (!select || !_devices.length) return;
+    const byId = new Map(_devices.map(d => [d.device_id, d.display_name]));
+    for (const option of select.options) {
+        if (option.value === 'all') continue;
+        const label = byId.get(option.value);
+        if (label) option.textContent = label;
+    }
+}
+
+// ── 장치 온라인/오프라인 상태 ────────────────────────────
+// ESP32가 죽거나 Wi-Fi가 끊기면 새 데이터가 안 올 뿐, 화면은 마지막 값을 계속 보여준다.
+// 그래서 "마지막 수신이 얼마나 오래됐는지"를 서버에서 판정해 배지로 노출한다.
+
+function formatAge(seconds) {
+    if (seconds == null) return '';
+    if (seconds < 60) return `${Math.round(seconds)}초 전`;
+    if (seconds < 3600) return `${Math.floor(seconds / 60)}분 전`;
+    if (seconds < 86400) return `${Math.floor(seconds / 3600)}시간 전`;
+    return `${Math.floor(seconds / 86400)}일 전`;
+}
+
+function renderDeviceStatusBadge(data) {
+    const el = document.getElementById('device-status-badge');
+    if (!el) return;
+
+    // 전체 보기에서는 개별 장치가 아니라 "오프라인이 몇 대인지"가 중요한 정보다.
+    if (!SELECTED_DEVICE_ID) {
+        const offline = data?.offline_count ?? 0;
+        const total = data?.devices?.length ?? 0;
+        if (!total) {
+            el.className = 'dev-badge dev-unknown';
+            el.textContent = '장치 없음';
+        } else if (offline > 0) {
+            el.className = 'dev-badge dev-offline';
+            el.textContent = `오프라인 ${offline}/${total}`;
+        } else {
+            el.className = 'dev-badge dev-online';
+            el.textContent = `전체 온라인 (${total})`;
+        }
+        el.title = (data?.devices ?? [])
+            .map(entry => `${entry.device_id}: ${entry.status} (${formatAge(entry.age_seconds) || '시각 불명'})`)
+            .join('\n') || '장치 연결 상태';
+        return;
+    }
+
+    const current = data?.current;
+    if (!current || current.status === 'unknown') {
+        el.className = 'dev-badge dev-unknown';
+        el.textContent = current && current.total === 0 ? '수신 기록 없음' : '상태 불명';
+        el.title = '마지막 수신 시각을 확인할 수 없습니다.';
+        return;
+    }
+
+    const age = formatAge(current.age_seconds);
+    if (current.status === 'offline') {
+        el.className = 'dev-badge dev-offline';
+        el.textContent = `오프라인 · ${age}`;
+        el.title = `${current.offline_after_seconds}초 넘게 수신이 없습니다.`;
+    } else {
+        el.className = 'dev-badge dev-online';
+        el.textContent = `온라인 · ${age}`;
+        el.title = `마지막 수신: ${current.last_seen_at ?? '—'}`;
+    }
+}
+
+async function refreshDeviceStatus() {
+    try {
+        const data = await fetchJson('device-status', apiUrl('/api/dashboard/device-status'));
+        if (data === undefined) return;
+        renderDeviceStatusBadge(data);
+    } catch (e) {
+        console.error('Device status refresh failed:', e);
+    }
+}
+
+// ── 알림 기록 ─────────────────────────────────────────────
+// alert_service가 event_log에 쌓아 온 이상/복구 기록을 화면에서 조회한다.
+// 예전에는 Discord로 한 번 보내고 나면 서버 DB에만 남아 확인할 방법이 없었다.
+
+let eventsPage   = 1;
+let eventsStatus = '';
+let eventsFilters = { metric: '', date: '', time_from: '', time_to: '' };
+let eventsMeta   = { page: null, pages: null, total: null, active: null };
+
+function formatEventNumber(value) {
+    if (value == null) return '—';
+    const n = Number(value);
+    if (!Number.isFinite(n)) return value;
+    return Number.isInteger(n) ? n : Math.round(n * 100) / 100;
+}
+
+function renderEventsTable(items) {
+    const tbody = document.getElementById('events-tbody');
+    if (!tbody) return;
+
+    if (!items.length) {
+        renderEmptyTable('events-tbody', 6, '알림 기록이 없습니다.');
+        return;
+    }
+
+    tbody.textContent = '';
+    for (const row of items) {
+        const tr = document.createElement('tr');
+        appendTextCell(tr, row.created_at ?? '—');
+        appendTextCell(tr, row.device_id ?? '—');
+        appendTextCell(tr, row.metric_label ?? row.metric);
+
+        // 상태는 배지로 표시해야 이상/복구가 표에서 한눈에 구분된다.
+        const statusCell = document.createElement('td');
+        const badge = document.createElement('span');
+        badge.className = `event-status ${row.status === 'recovered'
+            ? 'event-recovered' : row.severity === 'danger' ? 'event-danger' : 'event-abnormal'}`;
+        badge.textContent = row.status === 'recovered'
+            ? '복구' : `${row.severity === 'danger' ? '위험' : '경고'} · ${row.event_label}`;
+        statusCell.appendChild(badge);
+        tr.appendChild(statusCell);
+
+        // 오프라인 이벤트는 측정값/범위 대신 경과 시간과 판정 기준을 보여준다.
+        const isDevice = row.metric === 'device';
+        const value = isDevice
+            ? (row.value != null ? formatAge(row.value) : '—')
+            : `${formatEventNumber(row.value)}${row.unit ?? ''}`;
+        const range = isDevice
+            ? (row.threshold_max != null ? `${formatEventNumber(row.threshold_max)}초 무응답 시` : '—')
+            : (row.threshold_min != null && row.threshold_max != null
+                ? `${formatEventNumber(row.threshold_min)} ~ ${formatEventNumber(row.threshold_max)}${row.unit ?? ''}`
+                : '—');
+
+        appendTextCell(tr, value, 'event-value');
+        appendTextCell(tr, range, 'event-range');
+        tbody.appendChild(tr);
+    }
+}
+
+function renderEventsPagination(page, pages, total) {
+    const el = document.getElementById('events-pagination');
+    if (!el) return;
+
+    const btn = (label, p, active = false, disabled = false) =>
+        `<button class="page-btn${active ? ' active' : ''}" ${disabled ? 'disabled' : ''}
+            onclick="${disabled || active ? '' : `loadEvents(${p})`}">${label}</button>`;
+
+    let html = btn('‹', page - 1, false, page === 1);
+    if (pages <= 1) {
+        html += btn(1, 1, true);
+    } else {
+        const delta = 2;
+        let prev = -1;
+        for (let p = 1; p <= pages; p++) {
+            if (p === 1 || p === pages || (p >= page - delta && p <= page + delta)) {
+                if (prev !== -1 && p - prev > 1) html += `<span class="page-info">…</span>`;
+                html += btn(p, p, p === page);
+                prev = p;
+            }
+        }
+    }
+    html += btn('›', page + 1, false, page === pages);
+    html += `<span class="page-info">총 ${total}건</span>`;
+    el.innerHTML = html;
+}
+
+function renderActiveAlertBadge(active) {
+    const el = document.getElementById('events-active');
+    if (!el) return;
+    if (!active) {
+        el.style.display = 'none';
+        return;
+    }
+    el.style.display = '';
+    el.textContent = `진행 중 ${active}건`;
+}
+
+async function loadEvents(page = 1) {
+    eventsPage = page;
+    const params = new URLSearchParams({ page, per_page: 10 });
+    if (SELECTED_DEVICE_ID) params.set('device_id', SELECTED_DEVICE_ID);
+    if (eventsStatus) params.set('status', eventsStatus);
+    if (eventsFilters.metric) params.set('metric', eventsFilters.metric);
+    if (eventsFilters.date) params.set('date', eventsFilters.date);
+    if (eventsFilters.time_from) params.set('time_from', eventsFilters.time_from);
+    if (eventsFilters.time_to) params.set('time_to', eventsFilters.time_to);
+
+    try {
+        const data = await fetchJson('events', `/api/dashboard/events?${params}`);
+        if (data === undefined) return;
+
+        eventsPage = data.page;
+        renderEventsTable(data.items);
+
+        // 히스토리 표와 같은 이유로, 메타 정보가 그대로면 페이지 버튼을 다시 그리지 않는다.
+        // 폴링마다 버튼이 새로 만들어지면 클릭 중에 DOM이 교체되어 조작이 끊긴다.
+        const metaChanged =
+            data.page !== eventsMeta.page ||
+            data.pages !== eventsMeta.pages ||
+            data.total !== eventsMeta.total ||
+            data.active !== eventsMeta.active;
+        if (metaChanged) {
+            renderEventsPagination(data.page, data.pages, data.total);
+            document.getElementById('events-total').textContent = data.total;
+            renderActiveAlertBadge(data.active);
+            eventsMeta = {
+                page: data.page, pages: data.pages,
+                total: data.total, active: data.active,
+            };
+        }
+    } catch (e) {
+        console.error('Events load failed:', e);
+    }
+}
+
+function setEventStatus(status, btn) {
+    eventsStatus = status;
+    document.querySelectorAll('#events-btn-all, #events-btn-abnormal, #events-btn-recovered')
+        .forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    // 필터가 바뀌면 페이지 수 자체가 달라지므로 메타 캐시를 비워 강제로 다시 그린다.
+    eventsMeta = { page: null, pages: null, total: null, active: null };
+    loadEvents(1);
+}
+
+function searchEvents() {
+    eventsFilters = {
+        metric: document.getElementById('events-filter-metric').value,
+        date: document.getElementById('events-filter-date').value,
+        time_from: document.getElementById('events-filter-from').value,
+        time_to: document.getElementById('events-filter-to').value,
+    };
+    eventsMeta = { page: null, pages: null, total: null, active: null };
+    loadEvents(1);
+}
+
+function clearEventFilters() {
+    document.getElementById('events-filter-metric').value = '';
+    document.getElementById('events-filter-date').value = '';
+    document.getElementById('events-filter-from').value = '';
+    document.getElementById('events-filter-to').value = '';
+    eventsFilters = { metric: '', date: '', time_from: '', time_to: '' };
+    eventsMeta = { page: null, pages: null, total: null, active: null };
+    loadEvents(1);
+}
+
+function refreshVisibleEvents() {
+    if (eventsPage === 1) loadEvents(1);
+}
+
+// ── 장치 관리 ─────────────────────────────────────────────
+// 지금까지 장치는 "센서 데이터에 device_id가 등장했는가"로만 존재했다.
+// 그래서 새 보드는 데이터를 보내기 전까지 화면에 없었고, esp32_01 같은
+// 식별자만 보여 어느 온실의 어느 자리인지 알 수 없었다.
+
+let _devices = [];
+
+function openDeviceModal() {
+    document.getElementById('device-modal').style.display = 'flex';
+    showDeviceList();
+}
+
+function closeDeviceModal() {
+    document.getElementById('device-modal').style.display = 'none';
+}
+
+function showDeviceList() {
+    document.getElementById('device-modal-list-view').style.display = '';
+    document.getElementById('device-modal-edit-view').style.display = 'none';
+    loadDevices();
+}
+
+function renderDeviceList(devices) {
+    const el = document.getElementById('device-modal-list');
+    if (!el) return;
+    if (!devices.length) {
+        el.innerHTML = '<div style="color:#475569;font-size:0.84rem">등록된 장치도, 수신된 데이터도 없습니다.</div>';
+        return;
+    }
+
+    el.textContent = '';
+    for (const device of devices) {
+        const row = document.createElement('div');
+        row.className = 'device-row';
+
+        const main = document.createElement('div');
+        main.className = 'device-row-main';
+        const name = document.createElement('div');
+        name.className = 'device-row-name';
+        name.textContent = device.label || device.device_id;
+        main.appendChild(name);
+
+        const meta = document.createElement('div');
+        meta.className = 'device-row-meta';
+        const parts = [device.device_id];
+        if (device.location) parts.push(device.location);
+        if (!device.has_data) parts.push('수신 기록 없음');
+        meta.textContent = parts.join(' · ');
+        main.appendChild(meta);
+        row.appendChild(main);
+
+        const tag = document.createElement('span');
+        tag.className = `device-tag ${device.registered ? 'tag-registered' : 'tag-unknown'}`;
+        tag.textContent = device.registered ? '등록됨' : '미등록';
+        row.appendChild(tag);
+
+        const actions = document.createElement('div');
+        actions.className = 'crop-list-actions';
+        const editBtn = document.createElement('button');
+        editBtn.className = 'btn btn-ghost btn-xs';
+        editBtn.textContent = device.registered ? '수정' : '등록';
+        editBtn.onclick = () => showDeviceForm(device.device_id);
+        actions.appendChild(editBtn);
+
+        if (device.registered) {
+            const delBtn = document.createElement('button');
+            delBtn.className = 'btn btn-danger btn-xs';
+            delBtn.textContent = '삭제';
+            delBtn.onclick = () => confirmDeleteDevice(device.device_id);
+            actions.appendChild(delBtn);
+        }
+        row.appendChild(actions);
+        el.appendChild(row);
+    }
+}
+
+async function loadDevices() {
+    try {
+        const data = await fetchJson('devices-manage', '/api/devices');
+        if (data === undefined) return;
+        _devices = data.devices ?? [];
+        renderDeviceList(_devices);
+    } catch (e) {
+        console.error('Device list load failed:', e);
+    }
+}
+
+function showDeviceForm(deviceId) {
+    document.getElementById('device-modal-list-view').style.display = 'none';
+    document.getElementById('device-modal-edit-view').style.display = '';
+
+    const device = deviceId ? _devices.find(d => d.device_id === deviceId) : null;
+    document.getElementById('device-form-title').textContent =
+        device && device.registered ? '장치 수정' : '장치 등록';
+    document.getElementById('device-form-msg').textContent = '';
+    document.getElementById('device-form-msg').className = 'modal-msg';
+
+    const idInput = document.getElementById('device-form-id');
+    idInput.value = deviceId ?? '';
+    // 이미 존재하는 장치의 ID는 바꾸지 못하게 한다.
+    // ID를 바꾸면 그 장치의 센서 기록과 연결이 끊어지기 때문이다.
+    idInput.disabled = Boolean(deviceId);
+
+    document.getElementById('device-form-label').value = device?.label ?? '';
+    document.getElementById('device-form-location').value = device?.location ?? '';
+    document.getElementById('device-form-note').value = device?.note ?? '';
+}
+
+async function submitDeviceForm() {
+    const msgEl = document.getElementById('device-form-msg');
+    const deviceId = document.getElementById('device-form-id').value.trim();
+    if (!deviceId) {
+        msgEl.textContent = '장치 ID를 입력하세요.';
+        msgEl.className = 'modal-msg error';
+        return;
+    }
+
+    msgEl.textContent = '저장 중...';
+    msgEl.className = 'modal-msg';
+    try {
+        const res = await fetch('/api/devices', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                device_id: deviceId,
+                label: document.getElementById('device-form-label').value,
+                location: document.getElementById('device-form-location').value,
+                note: document.getElementById('device-form-note').value,
+            }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '저장에 실패했습니다.');
+
+        msgEl.textContent = '저장되었습니다!';
+        msgEl.className = 'modal-msg ok';
+        setTimeout(showDeviceList, 700);
+    } catch (e) {
+        msgEl.textContent = e.message || '저장에 실패했습니다.';
+        msgEl.className = 'modal-msg error';
+    }
+}
+
+async function confirmDeleteDevice(deviceId) {
+    if (!confirm(`'${deviceId}' 등록 정보를 삭제할까요?\n\n센서 기록은 삭제되지 않습니다.`)) return;
+    const msgEl = document.getElementById('device-list-msg');
+    try {
+        const res = await fetch(`/api/devices/${encodeURIComponent(deviceId)}`,
+                                { method: 'DELETE' });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '삭제에 실패했습니다.');
+        msgEl.textContent = '삭제되었습니다.';
+        msgEl.className = 'modal-msg ok';
+        loadDevices();
+    } catch (e) {
+        msgEl.textContent = e.message || '삭제에 실패했습니다.';
+        msgEl.className = 'modal-msg error';
+    }
+}
+
+// ── 알림 설정 ─────────────────────────────────────────────
+// 항목별 on/off, 재알림 간격, Webhook URL을 DB에 저장한다.
+// 예전에는 코드 상수와 환경변수라 서버를 다시 띄워야만 바꿀 수 있었다.
+
+let _alertFields = [];
+
+function setAlertMessage(text, kind = '') {
+    const el = document.getElementById('alert-settings-message');
+    if (!el) return;
+    el.textContent = text;
+    el.className = `threshold-message${kind ? ` ${kind}` : ''}`;
+}
+
+function renderAlertToggles(fields, settings) {
+    const el = document.getElementById('alert-toggle-list');
+    if (!el) return;
+    el.textContent = '';
+    for (const field of fields) {
+        const row = document.createElement('div');
+        row.className = 'setting-row';
+
+        const label = document.createElement('label');
+        label.htmlFor = `alert-toggle-${field.key}`;
+        label.textContent = field.label;
+        row.appendChild(label);
+
+        const input = document.createElement('input');
+        input.type = 'checkbox';
+        input.id = `alert-toggle-${field.key}`;
+        input.checked = Boolean(settings[field.key]);
+        row.appendChild(input);
+
+        el.appendChild(row);
+    }
+}
+
+async function loadAlertSettings() {
+    const scope = document.getElementById('alert-settings-scope');
+    if (scope) {
+        scope.textContent = SELECTED_DEVICE_ID
+            ? SELECTED_DEVICE_ID
+            : '전체 기본값';
+    }
+    const resetBtn = document.getElementById('alert-reset-btn');
+    // 전역 기본값에는 "기본값으로 되돌리기"가 의미가 없다.
+    if (resetBtn) resetBtn.disabled = !SELECTED_DEVICE_ID;
+
+    try {
+        const url = SELECTED_DEVICE_ID
+            ? `/api/alert-settings?device_id=${encodeURIComponent(SELECTED_DEVICE_ID)}`
+            : '/api/alert-settings';
+        const data = await fetchJson('alert-settings', url);
+        if (data === undefined) return;
+
+        _alertFields = data.fields ?? [];
+        renderAlertToggles(_alertFields, data.settings ?? {});
+
+        const cooldown = document.getElementById('alert-cooldown');
+        if (cooldown) cooldown.value = data.settings?.cooldown_minutes ?? '';
+        const settingValues = {
+            'alert-abnormal-count': data.settings?.abnormal_count,
+            'alert-duration': data.settings?.abnormal_duration_seconds,
+            'alert-recovery-count': data.settings?.recovery_count,
+            'alert-danger-percent': data.settings?.danger_deviation_percent,
+            'alert-summary-hour': data.settings?.summary_hour,
+            'alert-summary-weekday': data.settings?.summary_weekday,
+        };
+        for (const [id, value] of Object.entries(settingValues)) {
+            const input = document.getElementById(id);
+            if (input) input.value = value ?? '';
+        }
+        const booleanValues = {
+            'alert-danger-immediate': data.settings?.danger_immediate,
+            'alert-daily-summary': data.settings?.daily_summary,
+            'alert-weekly-summary': data.settings?.weekly_summary,
+        };
+        for (const [id, value] of Object.entries(booleanValues)) {
+            const input = document.getElementById(id);
+            if (input) input.checked = Boolean(value);
+        }
+        const webhook = document.getElementById('alert-webhook');
+        if (webhook) {
+            webhook.value = '';
+            webhook.placeholder = data.settings?.webhook_configured
+                ? '기존 웹훅이 설정되어 있습니다 (변경할 때만 입력)'
+                : '비우면 서버 환경변수를 사용합니다';
+        }
+        const clearWebhook = document.getElementById('alert-webhook-clear');
+        if (clearWebhook) clearWebhook.checked = false;
+
+        const sourceEl = document.getElementById('alert-settings-source');
+        if (sourceEl) {
+            const source = data.settings?.source;
+            sourceEl.textContent =
+                source === 'device' ? '이 장치만의 설정을 사용 중입니다.'
+                : source === 'global' ? '전체 기본 설정을 따르고 있습니다.'
+                : '아직 저장된 설정이 없어 기본 동작을 사용합니다.';
+        }
+        setAlertMessage('');
+    } catch (e) {
+        console.error('Alert settings load failed:', e);
+        setAlertMessage('알림 설정을 불러오지 못했습니다.', 'error');
+    }
+}
+
+async function saveAlertSettings() {
+    const payload = {};
+    if (SELECTED_DEVICE_ID) payload.device_id = SELECTED_DEVICE_ID;
+
+    for (const field of _alertFields) {
+        const input = document.getElementById(`alert-toggle-${field.key}`);
+        if (input) payload[field.key] = input.checked;
+    }
+
+    const cooldownRaw = (document.getElementById('alert-cooldown')?.value ?? '').trim();
+    // 빈 값은 "서버 기본값을 따른다"는 의미로 null을 보낸다.
+    payload.cooldown_minutes = cooldownRaw === '' ? null : Number(cooldownRaw);
+    if (cooldownRaw !== '' && Number.isNaN(payload.cooldown_minutes)) {
+        setAlertMessage('재알림 간격은 숫자로 입력하세요.', 'error');
+        return;
+    }
+
+    const numericSettings = {
+        abnormal_count: 'alert-abnormal-count',
+        abnormal_duration_seconds: 'alert-duration',
+        recovery_count: 'alert-recovery-count',
+        danger_deviation_percent: 'alert-danger-percent',
+        summary_hour: 'alert-summary-hour',
+        summary_weekday: 'alert-summary-weekday',
+    };
+    for (const [key, id] of Object.entries(numericSettings)) {
+        const raw = (document.getElementById(id)?.value ?? '').trim();
+        if (raw === '' || !Number.isFinite(Number(raw))) {
+            setAlertMessage('알림 확인 조건과 요약 시간은 숫자로 입력하세요.', 'error');
+            return;
+        }
+        payload[key] = Number(raw);
+    }
+    payload.danger_immediate = Boolean(document.getElementById('alert-danger-immediate')?.checked);
+    payload.daily_summary = Boolean(document.getElementById('alert-daily-summary')?.checked);
+    payload.weekly_summary = Boolean(document.getElementById('alert-weekly-summary')?.checked);
+
+    const webhookValue = (document.getElementById('alert-webhook')?.value ?? '').trim();
+    const clearWebhook = document.getElementById('alert-webhook-clear')?.checked;
+    if (clearWebhook) payload.webhook_url = null;
+    else if (webhookValue) payload.webhook_url = webhookValue;
+
+    setAlertMessage('저장 중...');
+    try {
+        const res = await fetch('/api/alert-settings', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+            const detail = data.details
+                ? Object.entries(data.details).map(([k, v]) => `${k}: ${v}`).join(', ')
+                : data.error;
+            throw new Error(detail || '저장에 실패했습니다.');
+        }
+        setAlertMessage('알림 설정을 저장했습니다.', 'ok');
+        loadAlertSettings();
+    } catch (e) {
+        console.error('Alert settings save failed:', e);
+        setAlertMessage(e.message || '저장에 실패했습니다.', 'error');
+    }
+}
+
+async function resetAlertSettings() {
+    if (!SELECTED_DEVICE_ID) return;
+    if (!confirm(`${SELECTED_DEVICE_ID}의 개별 알림 설정을 지우고 전체 기본값을 따를까요?`)) return;
+    try {
+        const res = await fetch(
+            `/api/alert-settings/${encodeURIComponent(SELECTED_DEVICE_ID)}`,
+            { method: 'DELETE' });
+        if (!res.ok && res.status !== 404) throw new Error('되돌리기에 실패했습니다.');
+        setAlertMessage('전체 기본값을 따르도록 되돌렸습니다.', 'ok');
+        loadAlertSettings();
+    } catch (e) {
+        setAlertMessage(e.message || '되돌리기에 실패했습니다.', 'error');
+    }
+}
+
+// ── CSV 내보내기 ──────────────────────────────────────────
+// 화면에서 보고 있는 조건을 그대로 붙여, 표에서 본 범위와 파일 내용이 일치하게 한다.
+
+function downloadCsv(path, params) {
+    const query = new URLSearchParams(params);
+    if (SELECTED_DEVICE_ID) query.set('device_id', SELECTED_DEVICE_ID);
+    // location.href를 쓰면 브라우저가 Content-Disposition을 보고 저장 대화상자를 연다.
+    window.location.href = `${path}?${query.toString()}`;
+}
+
+function exportSensorCsv() {
+    downloadCsv('/api/export/sensor.csv', {
+        date: historyFilters.date || '',
+        time_from: historyFilters.time_from || '',
+        time_to: historyFilters.time_to || '',
+    });
+}
+
+function exportEventsCsv() {
+    downloadCsv('/api/export/events.csv', { status: eventsStatus || '' });
+}
+
+// ── 저장 현황 / 보존 정책 ─────────────────────────────────
+// 5초 주기 수집이면 하루 약 17,000행이 쌓인다. 현재 규모와 정리 수단을 함께 보여준다.
+
+function formatBytes(bytes) {
+    if (!bytes) return '—';
+    const units = ['B', 'KB', 'MB', 'GB'];
+    let value = bytes;
+    let index = 0;
+    while (value >= 1024 && index < units.length - 1) {
+        value /= 1024;
+        index++;
+    }
+    return `${value.toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
+}
+
+function setStorageMessage(text, kind = '') {
+    const el = document.getElementById('storage-message');
+    if (!el) return;
+    el.textContent = text;
+    el.className = `threshold-message${kind ? ` ${kind}` : ''}`;
+}
+
+async function loadStorageStats() {
+    try {
+        const data = await fetchJson('storage', '/api/maintenance/storage');
+        if (data === undefined) return;
+
+        const set = (id, text) => {
+            const el = document.getElementById(id);
+            if (el) el.textContent = text;
+        };
+        set('storage-raw', `${(data.raw_rows ?? 0).toLocaleString()}행`);
+        set('storage-hourly', `${(data.hourly_rows ?? 0).toLocaleString()}행`);
+        set('storage-size', formatBytes(data.database_bytes));
+        set('storage-oldest', data.oldest_raw_at ?? '—');
+
+        const policy = document.getElementById('storage-policy');
+        if (policy) {
+            policy.textContent =
+                `원시 ${data.raw_retention_days}일 · 집계 ${data.hourly_retention_days}일 보관. ` +
+                `정리는 집계가 끝난 구간만 삭제합니다.`;
+        }
+    } catch (e) {
+        console.error('Storage stats load failed:', e);
+    }
+}
+
+async function runRollup() {
+    setStorageMessage('집계 중...');
+    try {
+        const res = await fetch('/api/maintenance/rollup', { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '집계에 실패했습니다.');
+        setStorageMessage(`시간별 집계 ${data.rolled_up_buckets}건을 갱신했습니다.`, 'ok');
+        loadStorageStats();
+    } catch (e) {
+        setStorageMessage(e.message || '집계에 실패했습니다.', 'error');
+    }
+}
+
+async function runRetention() {
+    if (!confirm('보존 기간이 지난 원시 데이터를 삭제할까요?\n\n집계가 끝난 구간만 삭제되며 되돌릴 수 없습니다.')) {
+        return;
+    }
+    setStorageMessage('정리 중...');
+    try {
+        const res = await fetch('/api/maintenance/retention', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({}),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '정리에 실패했습니다.');
+        setStorageMessage(
+            `원시 ${data.deleted_raw_rows}행 삭제 · 집계 ${data.rolled_up_buckets}건 갱신`, 'ok');
+        loadStorageStats();
+    } catch (e) {
+        setStorageMessage(e.message || '정리에 실패했습니다.', 'error');
+    }
+}
+
+// ── 인증 상태 표시 ────────────────────────────────────────
+async function loadAuthStatus() {
+    try {
+        const data = await fetchJson('auth', '/api/auth/status');
+        if (data === undefined) return;
+        const chip = document.getElementById('auth-chip');
+        if (chip && data.enabled) {
+            chip.style.display = 'inline-flex';
+            chip.classList.toggle('auth-needed', !data.authenticated);
+            chip.textContent = data.authenticated ? '🔒 인증됨' : '🔓 로그인 필요';
+            chip.title = data.authenticated
+                ? '클릭하여 인증 상태 관리'
+                : '클릭하여 API 키로 로그인';
+        }
+        if (data.enabled && !data.authenticated) openAuthModal();
+        return !data.enabled || data.authenticated;
+    } catch (e) {
+        console.error('Auth status load failed:', e);
+        return false;
+    }
+}
+
+function openAuthModal() {
+    const modal = document.getElementById('auth-modal');
+    if (modal) modal.style.display = 'flex';
+    setTimeout(() => document.getElementById('auth-key')?.focus(), 0);
+}
+
+function closeAuthModal() {
+    const modal = document.getElementById('auth-modal');
+    if (modal) modal.style.display = 'none';
+}
+
+async function submitAuthLogin() {
+    const key = document.getElementById('auth-key')?.value ?? '';
+    const message = document.getElementById('auth-message');
+    if (message) message.textContent = '확인 중...';
+    const response = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ api_key: key }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+        if (message) {
+            message.textContent = data.error || 'API 키가 올바르지 않습니다.';
+            message.className = 'modal-msg error';
+        }
+        return;
+    }
+
+    window.location.reload();
+}
+
+async function logoutAuth() {
+    await fetch('/api/auth/logout', { method: 'POST' });
+    window.location.reload();
 }
 
 async function refreshOnSensorChange() {
@@ -2344,8 +3809,11 @@ async function refreshOnSensorChange() {
         loadCharts(currentChartPeriod),
         loadWateringEvents(),
         refreshDeviceOptions(),
+        refreshDeviceStatus(),
     ];
     if (historyPage === 1) tasks.push(loadHistory(1));
+    // 새 센서 row는 알림 상태 전이를 만들 수 있으므로 알림 기록도 함께 갱신한다.
+    if (eventsPage === 1) tasks.push(loadEvents(1));
     await Promise.all(tasks);
 }
 
@@ -2377,32 +3845,123 @@ const REFRESH_MS = {
     averages: 30000,
     history: 30000,
     watering: 15000,
+    events: 15000,
+    // 오프라인 판정은 새 데이터가 "오지 않을 때" 바뀐다.
+    // mtime 폴링은 변화가 없으면 아무 것도 갱신하지 않으므로 별도 주기가 필요하다.
+    deviceStatus: 10000,
+    // 저장 현황은 천천히 변하므로 드물게 확인한다.
+    storage: 120000,
 };
 
 // ── Init ─────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
+    const authenticated = await loadAuthStatus();
+    if (!authenticated) return;
+    const workTime = document.getElementById('work-log-time');
+    if (workTime && !workTime.value) {
+        const localNow = new Date(Date.now() - new Date().getTimezoneOffset() * 60000);
+        workTime.value = localNow.toISOString().slice(0, 16);
+    }
     // 작물 프로필을 먼저 불러와 가이드 범위와 차트 기준선을 설정한 뒤,
     // 장치 임계값을 로드해 입력창을 채운다. 순서를 보장하기 위해 await를 사용한다.
+    // 두 값이 모두 있어야 "작물 권장 범위와 임계값이 같은지" 비교 문구를 만들 수 있다.
     await loadActiveCrop();
-    loadThresholds(SELECTED_DEVICE_ID);
+    await loadThresholds(SELECTED_DEVICE_ID);
+    updateThresholdSyncNote();
 
     refreshLatest();
     loadAverages(currentAvgPeriod);
     loadCharts(currentChartPeriod);
     loadGrowth();
     loadWateringEvents();
+    loadWorkLogs();
     loadHistory(1);
+    loadEvents(1);
     refreshDeviceOptions();
+    refreshDeviceStatus();
+    loadAlertSettings();
+    loadStorageStats();
+    // 장치 목록을 먼저 받아야 드롭다운에 별칭을 입힐 수 있다.
+    loadDevices().then(applyDeviceLabels);
     pollSensorChanges();
 
-    setInterval(pollSensorChanges, REFRESH_MS.change);
-    setInterval(refreshLatest, REFRESH_MS.latest);
-    setInterval(() => loadCharts(currentChartPeriod), REFRESH_MS.chart);
-    setInterval(() => loadAverages(currentAvgPeriod), REFRESH_MS.averages);
-    setInterval(refreshVisibleHistory, REFRESH_MS.history);
-    setInterval(loadWateringEvents, REFRESH_MS.watering);
+    const visibleInterval = (callback, interval) => setInterval(() => {
+        if (!document.hidden) callback();
+    }, interval);
+    visibleInterval(pollSensorChanges, REFRESH_MS.change);
+    // 센서 기반 패널은 mtime이 바뀐 경우 refreshOnSensorChange()에서 한 번에
+    // 갱신한다. 각각의 고정 주기 조회를 중복 실행하지 않는다.
+    visibleInterval(refreshVisibleEvents, REFRESH_MS.events);
+    visibleInterval(refreshDeviceStatus, REFRESH_MS.deviceStatus);
+    visibleInterval(loadStorageStats, REFRESH_MS.storage);
+    document.addEventListener('visibilitychange', () => {
+        if (!document.hidden) {
+            refreshOnSensorChange();
+            refreshVisibleEvents();
+            loadStorageStats();
+        }
+    });
 });
 </script>
+
+<!-- ── 장치 관리 모달 ── -->
+<div id="device-modal" class="modal-overlay" style="display:none"
+     onclick="if(event.target===this) closeDeviceModal()">
+    <div class="modal-card">
+
+        <!-- 목록 뷰 -->
+        <div id="device-modal-list-view">
+            <div class="modal-header">
+                <span class="modal-title">장치 관리</span>
+                <button class="modal-close-btn" onclick="closeDeviceModal()">✕</button>
+            </div>
+            <div class="modal-body" id="device-modal-list">
+                <div style="color:#475569;font-size:0.84rem">불러오는 중…</div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-primary" onclick="showDeviceForm(null)">+ 장치 등록</button>
+                <div class="modal-msg" id="device-list-msg"></div>
+            </div>
+        </div>
+
+        <!-- 편집 뷰 -->
+        <div id="device-modal-edit-view" style="display:none">
+            <div class="modal-header">
+                <button class="modal-back-btn" onclick="showDeviceList()">← 목록</button>
+                <span class="modal-title" id="device-form-title">장치 등록</span>
+                <button class="modal-close-btn" onclick="closeDeviceModal()">✕</button>
+            </div>
+            <div class="modal-body">
+                <div class="crop-form-field">
+                    <label class="crop-form-label">장치 ID</label>
+                    <input id="device-form-id" type="text" class="crop-form-input"
+                           placeholder="예: esp32_01 (펌웨어의 DEVICE_ID와 같아야 합니다)">
+                </div>
+                <div class="crop-form-field">
+                    <label class="crop-form-label">이름</label>
+                    <input id="device-form-label" type="text" class="crop-form-input"
+                           maxlength="60" placeholder="예: 북쪽 온실">
+                </div>
+                <div class="crop-form-field">
+                    <label class="crop-form-label">설치 위치</label>
+                    <input id="device-form-location" type="text" class="crop-form-input"
+                           maxlength="60" placeholder="예: A동 3열">
+                </div>
+                <div class="crop-form-field">
+                    <label class="crop-form-label">메모</label>
+                    <textarea id="device-form-note" class="crop-form-textarea"
+                              maxlength="500" rows="3" placeholder="예: DHT22 교체 2026-03"></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-primary" onclick="submitDeviceForm()">저장</button>
+                <button class="btn btn-ghost"   onclick="showDeviceList()">취소</button>
+                <div class="modal-msg" id="device-form-msg"></div>
+            </div>
+        </div>
+
+    </div>
+</div>
 
 <!-- ── 작물 프로필 관리 모달 ── -->
 <div id="crop-modal" class="modal-overlay" style="display:none"
@@ -2483,6 +4042,33 @@ document.addEventListener('DOMContentLoaded', async () => {
             </div>
         </div>
 
+    </div>
+</div>
+
+<!-- API 키는 서버가 검증한 뒤 HttpOnly 세션 쿠키로 바꾼다. 키 자체는 저장하지 않는다. -->
+<div id="auth-modal" class="modal-overlay" style="display:none"
+     onclick="if(event.target===this) closeAuthModal()">
+    <div class="modal-card" style="max-width:420px">
+        <div class="modal-header">
+            <span class="modal-title">대시보드 인증</span>
+            <button class="modal-close-btn" onclick="closeAuthModal()">✕</button>
+        </div>
+        <div class="modal-body">
+            <div class="crop-form-field">
+                <label class="crop-form-label" for="auth-key">API 키</label>
+                <input id="auth-key" type="password" class="crop-form-input"
+                       autocomplete="current-password"
+                       onkeydown="if(event.key==='Enter') submitAuthLogin()">
+            </div>
+            <div class="setting-hint">
+                키는 브라우저 저장소에 보관하지 않으며, 서버가 HttpOnly 세션 쿠키로 교환합니다.
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-primary" onclick="submitAuthLogin()">로그인</button>
+            <button class="btn btn-ghost" onclick="logoutAuth()">로그아웃</button>
+            <div class="modal-msg" id="auth-message"></div>
+        </div>
     </div>
 </div>
 

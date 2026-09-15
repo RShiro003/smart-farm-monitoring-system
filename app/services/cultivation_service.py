@@ -228,16 +228,22 @@ def create_growth_record(
         conn.close()
 
 
-def list_growth_records(device_id):
+def list_growth_records(device_id, limit=1000):
+    try:
+        limit = max(1, min(int(limit), 1000))
+    except (TypeError, ValueError):
+        limit = 1000
     conn = _connect()
     try:
         rows = conn.execute(
             """
-            SELECT * FROM growth_records
-            WHERE device_id = ?
-            ORDER BY recorded_at ASC, id ASC
+            SELECT * FROM (
+                SELECT * FROM growth_records
+                WHERE device_id = ?
+                ORDER BY recorded_at DESC, id DESC LIMIT ?
+            ) ORDER BY recorded_at ASC, id ASC
             """,
-            (device_id,),
+            (device_id, limit),
         ).fetchall()
         return [_row_to_dict(row) for row in rows]
     finally:
@@ -674,9 +680,33 @@ def get_daily_analysis(device_id, days=30):
     start_date = (datetime.now().date() - timedelta(days=days - 1)).isoformat()
     conn = _connect()
     try:
-        rows = conn.execute(
+        _ensure_tables(conn)
+        has_hourly = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='sensor_data_hourly'"
+        ).fetchone() is not None
+        oldest_raw = conn.execute(
+            "SELECT strftime('%Y-%m-%d %H:00:00', MIN(server_received_at)) "
+            "FROM sensor_data WHERE device_id = ?",
+            (device_id,),
+        ).fetchone()[0]
+        hourly_union = ""
+        sensor_params = [device_id, start_date]
+        if has_hourly:
+            boundary = oldest_raw or "9999-12-31 23:00:00"
+            hourly_union = """
+                UNION ALL
+                SELECT date(bucket), temperature_avg, temperature_min,
+                       temperature_max, humidity_avg, humidity_min, humidity_max,
+                       soil_moisture_avg, soil_moisture_min, soil_moisture_max,
+                       sample_count
+                FROM sensor_data_hourly
+                WHERE device_id = ? AND bucket >= ? AND bucket < ?
             """
-            WITH daily_sensor AS (
+            sensor_params.extend([device_id, start_date, boundary])
+        rows = conn.execute(
+            f"""
+            WITH sensor_parts AS (
                 SELECT
                     date(server_received_at) AS day,
                     AVG(temperature) AS temperature_avg,
@@ -694,6 +724,22 @@ def get_daily_analysis(device_id, days=30):
                   AND server_received_at >= ?
                   AND server_received_at IS NOT NULL
                 GROUP BY date(server_received_at)
+                {hourly_union}
+            ),
+            daily_sensor AS (
+                SELECT day,
+                    SUM(temperature_avg * sample_count) / NULLIF(SUM(CASE WHEN temperature_avg IS NOT NULL THEN sample_count ELSE 0 END), 0) AS temperature_avg,
+                    MIN(temperature_min) AS temperature_min,
+                    MAX(temperature_max) AS temperature_max,
+                    SUM(humidity_avg * sample_count) / NULLIF(SUM(CASE WHEN humidity_avg IS NOT NULL THEN sample_count ELSE 0 END), 0) AS humidity_avg,
+                    MIN(humidity_min) AS humidity_min,
+                    MAX(humidity_max) AS humidity_max,
+                    SUM(soil_moisture_avg * sample_count) / NULLIF(SUM(CASE WHEN soil_moisture_avg IS NOT NULL THEN sample_count ELSE 0 END), 0) AS soil_moisture_avg,
+                    MIN(soil_moisture_min) AS soil_moisture_min,
+                    MAX(soil_moisture_max) AS soil_moisture_max,
+                    SUM(sample_count) AS sample_count
+                FROM sensor_parts
+                GROUP BY day
             ),
             daily_watering AS (
                 SELECT date(detected_at) AS day, COUNT(*) AS watering_count
@@ -709,7 +755,7 @@ def get_daily_analysis(device_id, days=30):
             WHERE daily_sensor.day IS NOT NULL
             ORDER BY daily_sensor.day ASC
             """,
-            (device_id, start_date, device_id, start_date),
+            sensor_params + [device_id, start_date],
         ).fetchall()
     finally:
         conn.close()

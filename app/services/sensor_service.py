@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import sqlite3
 from datetime import datetime, timedelta
 
@@ -20,9 +21,21 @@ ALL_DEVICES_VALUE = "all"
 # 이렇게 해야 DB 스키마가 예측 가능하게 유지되고 대시보드 SELECT/그래프 로직도 고정 컬럼만 다루면 된다.
 _COLUMNS = (
     "device_id", "temperature", "humidity", "soil_moisture", "light",
-    "light_digital", "soil_digital", "soil_raw",
-    "timestamp", "server_received_at", "time",
+    "light_unit", "light_digital", "soil_digital", "soil_raw",
+    "timestamp", "server_received_at", "time", "sample_id", "sensor_errors",
 )
+
+# light 컬럼에 들어온 숫자가 어떤 의미인지 구분하기 위한 단위 값이다.
+# lux는 조도계가 측정한 실제 밝기, digital은 LM393류 비교기 모듈의 0/1 출력이다.
+# 두 값을 같은 임계값으로 비교하면 0/1은 어떤 lux 범위에도 들어가지 못해
+# 조도 판정이 항상 같은 결과로 굳어 버리므로 단위를 함께 저장한다.
+LIGHT_UNIT_LUX = "lux"
+LIGHT_UNIT_DIGITAL = "digital"
+LIGHT_UNITS = (LIGHT_UNIT_LUX, LIGHT_UNIT_DIGITAL)
+
+# 마지막 수신 이후 이 시간이 지나면 장치를 오프라인으로 본다.
+# ESP32는 약 5초 주기로 전송하므로 기본 120초는 약 24회 연속 누락에 해당한다.
+DEFAULT_OFFLINE_SECONDS = 120
 
 
 # ── Normalisation ──────────────────────────────────────────────────────────────
@@ -48,11 +61,25 @@ def normalize_device_filter(device_id):
     return value
 
 
+def normalize_light_unit(value, default=None):
+    # /api/sensor POST의 light_unit 값을 허용된 단위 문자열로 정규화한다.
+    # 알 수 없는 값은 default로 떨어뜨려 잘못된 단위가 DB에 들어가지 않게 한다.
+    if isinstance(value, str):
+        candidate = value.strip().lower()
+        if candidate in LIGHT_UNITS:
+            return candidate
+    return default
+
+
 def normalize_sensor_record(record):
     # INSERT 직전에도 device_id를 한 번 더 보정한다.
     # 라우트 검증을 거치지 않은 내부 마이그레이션 데이터도 같은 규칙으로 저장하기 위함이다.
     normalized = dict(record)
     normalized["device_id"] = normalize_device_id(normalized.get("device_id"))
+    if isinstance(normalized.get("sensor_errors"), list):
+        normalized["sensor_errors"] = json.dumps(
+            normalized["sensor_errors"], ensure_ascii=False
+        )
     return normalized
 
 
@@ -88,7 +115,13 @@ def _insert(conn, record):
 def _row_to_dict(row):
     # DB row를 Flask jsonify가 바로 처리할 수 있는 dict로 바꾼다.
     # id는 내부 정렬용 기본키라 대시보드에 노출하지 않고, NULL 컬럼은 응답에서 생략해 기존 JSON 형태와 맞춘다.
-    return {k: row[k] for k in row.keys() if row[k] is not None and k != "id"}
+    result = {k: row[k] for k in row.keys() if row[k] is not None and k != "id"}
+    if "sensor_errors" in result and isinstance(result["sensor_errors"], str):
+        try:
+            result["sensor_errors"] = json.loads(result["sensor_errors"])
+        except (TypeError, ValueError):
+            result["sensor_errors"] = [result["sensor_errors"]]
+    return result
 
 
 _TIME_EXPR = (
@@ -205,6 +238,7 @@ def _init_db():
     # 컬럼 의미:
     # - device_id: 여러 ESP32 노드를 구분하는 장치 ID. 예전 데이터는 legacy로 보정된다.
     # - temperature/humidity/soil_moisture/light: 대시보드 카드와 그래프가 사용하는 대표 센서값.
+    # - light_unit: light 값의 단위(lux 또는 digital). 알림/표시가 단위를 구분하는 기준이다.
     # - light_digital/soil_digital/soil_raw: 실제 센서 노드의 디지털/원시 진단값.
     # - timestamp: ESP32가 측정한 시각, server_received_at: Flask 서버가 받은 시각.
     # - time: 오래된 JSON 데이터와의 호환을 위해 유지하는 과거 컬럼.
@@ -218,19 +252,52 @@ def _init_db():
                 humidity           REAL,
                 soil_moisture      REAL,
                 light              REAL,
+                light_unit         TEXT,
                 light_digital      INTEGER,
                 soil_digital       INTEGER,
                 soil_raw           INTEGER,
                 timestamp          TEXT,
                 server_received_at TEXT,
-                time               TEXT
+                time               TEXT,
+                sample_id          TEXT,
+                sensor_errors      TEXT
             )
         """)
+        # 이미 운영 중인 DB에는 light_unit 컬럼이 없다.
+        # CREATE TABLE IF NOT EXISTS로는 컬럼이 추가되지 않으므로
+        # 실제 컬럼 목록을 확인해 없을 때만 ALTER한다.
+        existing_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(sensor_data)")
+        }
+        if "light_unit" not in existing_columns:
+            conn.execute("ALTER TABLE sensor_data ADD COLUMN light_unit TEXT")
+            # 과거 row는 단위를 알 수 없다. light_digital이 있고 light가 그 값과 같으면
+            # 디지털 조도 노드가 보낸 데이터이므로 digital로, 그 외 조도값은 lux로 본다.
+            conn.execute(
+                """
+                UPDATE sensor_data
+                SET light_unit = CASE
+                    WHEN light_digital IS NOT NULL AND (light IS NULL OR light = light_digital)
+                        THEN ?
+                    ELSE ?
+                END
+                WHERE light IS NOT NULL OR light_digital IS NOT NULL
+                """,
+                (LIGHT_UNIT_DIGITAL, LIGHT_UNIT_LUX),
+            )
+        if "sample_id" not in existing_columns:
+            conn.execute("ALTER TABLE sensor_data ADD COLUMN sample_id TEXT")
+        if "sensor_errors" not in existing_columns:
+            conn.execute("ALTER TABLE sensor_data ADD COLUMN sensor_errors TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sensor_data_device_id ON sensor_data(device_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sensor_data_id ON sensor_data(id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sensor_data_device_id_id ON sensor_data(device_id, id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sensor_data_received_at ON sensor_data(server_received_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sensor_data_device_received ON sensor_data(device_id, server_received_at)")
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_sensor_data_sample_id "
+            "ON sensor_data(device_id, sample_id) WHERE sample_id IS NOT NULL"
+        )
         conn.commit()
         # 새 DB가 비어 있을 때만 레거시 JSON을 가져온다.
         # 이미 SQLite에 row가 있으면 중복 import를 막기 위해 JSON을 다시 읽지 않는다.
@@ -281,7 +348,7 @@ def load_sensor_data():
         ).fetchall()
         return [_row_to_dict(row) for row in rows]
     except sqlite3.Error:
-        return []
+        raise
     finally:
         conn.close()
 
@@ -296,27 +363,25 @@ def list_sensor_records(device_id=None, limit=500, include_all=False):
 
     conn = _connect()
     try:
+        # include_all은 이전 클라이언트 호환을 위해 인자로 남기되, 메모리
+        # 고갈을 막기 위해 어떤 경우에도 5,000행 상한을 적용한다.
+        safe_limit = _normalize_positive_int(limit, 500, maximum=5000)
         if include_all:
-            rows = conn.execute(
-                f"SELECT * FROM sensor_data{where} ORDER BY id ASC",
-                params,
-            ).fetchall()
-        else:
-            safe_limit = _normalize_positive_int(limit, 500, maximum=5000)
-            rows = conn.execute(
-                f"""
-                SELECT * FROM (
-                    SELECT * FROM sensor_data{where}
-                    ORDER BY id DESC
-                    LIMIT ?
-                )
-                ORDER BY id ASC
-                """,
-                params + [safe_limit],
-            ).fetchall()
+            safe_limit = 5000
+        rows = conn.execute(
+            f"""
+            SELECT * FROM (
+                SELECT * FROM sensor_data{where}
+                ORDER BY id DESC
+                LIMIT ?
+            )
+            ORDER BY id ASC
+            """,
+            params + [safe_limit],
+        ).fetchall()
         return [_row_to_dict(row) for row in rows]
     except sqlite3.Error:
-        return []
+        raise
     finally:
         conn.close()
 
@@ -337,7 +402,7 @@ def get_latest_sensor_record(device_id=None):
         ).fetchone()
         return _row_to_dict(row) if row else None
     except sqlite3.Error:
-        return None
+        raise
     finally:
         conn.close()
 
@@ -354,9 +419,75 @@ def list_device_ids_from_db():
             if row["device_id"] is not None
         ]
     except sqlite3.Error:
-        return []
+        raise
     finally:
         conn.close()
+
+
+def offline_after_seconds():
+    # DEVICE_OFFLINE_SECONDS 환경변수로 현장의 전송 주기에 맞게 조정할 수 있다.
+    raw = os.environ.get("DEVICE_OFFLINE_SECONDS", str(DEFAULT_OFFLINE_SECONDS))
+    try:
+        seconds = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_OFFLINE_SECONDS
+    # 0 이하를 허용하면 정상 동작 중인 장치까지 즉시 오프라인이 되므로 하한을 둔다.
+    return max(10, seconds)
+
+
+def list_device_status(device_id=None):
+    """장치별 마지막 수신 시각과 온라인/오프라인 상태를 반환한다.
+
+    ESP32가 죽거나 Wi-Fi가 끊기면 /api/sensor POST 자체가 오지 않는다.
+    따라서 "새 데이터가 왔는지"가 아니라 "마지막 데이터가 얼마나 오래됐는지"로 판단한다.
+    """
+    selected = normalize_device_filter(device_id)
+    where = ""
+    params = []
+    if selected is not None:
+        where = " WHERE device_id = ?"
+        params.append(selected)
+
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT device_id, MAX({_TIME_EXPR}) AS last_seen_at, COUNT(*) AS total
+            FROM sensor_data{where}
+            GROUP BY device_id
+            ORDER BY device_id
+            """,
+            params,
+        ).fetchall()
+    except sqlite3.Error:
+        raise
+    finally:
+        conn.close()
+
+    now = datetime.now()
+    threshold = offline_after_seconds()
+    result = []
+    for row in rows:
+        last_seen_at = row["last_seen_at"]
+        parsed = parse_record_time({"server_received_at": last_seen_at})
+        # 시각을 해석할 수 없는 row(NTP 실패 등)는 판정 근거가 없으므로 unknown으로 둔다.
+        age_seconds = (now - parsed).total_seconds() if parsed else None
+        if age_seconds is None:
+            status = "unknown"
+        elif age_seconds <= threshold:
+            status = "online"
+        else:
+            status = "offline"
+
+        result.append({
+            "device_id": normalize_device_id(row["device_id"]),
+            "last_seen_at": last_seen_at,
+            "age_seconds": round(age_seconds, 1) if age_seconds is not None else None,
+            "status": status,
+            "offline_after_seconds": threshold,
+            "total": int(row["total"] or 0),
+        })
+    return result
 
 
 def get_sensor_history(device_id=None, page=1, per_page=10, date=None, time_from=None, time_to=None):
@@ -373,7 +504,7 @@ def get_sensor_history(device_id=None, page=1, per_page=10, date=None, time_from
         ).fetchall()
         return [_row_to_dict(row) for row in rows]
     except sqlite3.Error:
-        return []
+        raise
     finally:
         conn.close()
 
@@ -388,7 +519,7 @@ def count_sensor_history(device_id=None, date=None, time_from=None, time_to=None
         ).fetchone()
         return int(row[0] or 0)
     except sqlite3.Error:
-        return 0
+        raise
     finally:
         conn.close()
 
@@ -413,8 +544,9 @@ def get_sensor_rows_for_chart(device_id=None, period="hourly", limit=300):
     period = period if period in chart_windows else "hourly"
     safe_limit = _normalize_positive_int(limit, 300, maximum=5000)
 
+    cutoff = _period_cutoff(period, chart_windows, "hourly")
     clauses = ["server_received_at >= ?"]
-    params = [_period_cutoff(period, chart_windows, "hourly")]
+    params = [cutoff]
     selected = normalize_device_filter(device_id)
     if selected is not None:
         clauses.append("device_id = ?")
@@ -422,39 +554,79 @@ def get_sensor_rows_for_chart(device_id=None, period="hourly", limit=300):
 
     where = " WHERE " + " AND ".join(clauses)
     bucket_expr = bucket_exprs[period]
+    hourly_bucket_expr = bucket_expr.replace("server_received_at", "bucket")
 
     conn = _connect()
     try:
+        has_hourly = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='sensor_data_hourly'"
+        ).fetchone() is not None
+        if has_hourly:
+            hourly_device_where = ""
+            hourly_params = [cutoff]
+            if selected is not None:
+                hourly_device_where = " AND device_id = ?"
+                hourly_params.append(selected)
+            oldest_raw = conn.execute(
+                "SELECT strftime('%Y-%m-%d %H:00:00', MIN(server_received_at)) "
+                f"FROM sensor_data{(' WHERE device_id = ?' if selected is not None else '')}",
+                ([selected] if selected is not None else []),
+            ).fetchone()[0]
+            hourly_cutoff_clause = ""
+            if oldest_raw:
+                hourly_cutoff_clause = " AND bucket < ?"
+                hourly_params.append(oldest_raw)
+            historical_sql = f"""
+                UNION ALL
+                SELECT {hourly_bucket_expr}, temperature_avg, humidity_avg,
+                       soil_moisture_avg, light_avg,
+                       lux_samples, digital_samples, sample_count
+                FROM sensor_data_hourly
+                WHERE bucket >= ?{hourly_device_where}{hourly_cutoff_clause}
+            """
+        else:
+            historical_sql = ""
+            hourly_params = []
+
+        # 원본과 시간 롤업을 동일한 가중 행으로 합친다. 롤업은 현재 남아 있는
+        # 가장 오래된 원본 시간보다 이전 구간만 선택해 중복 집계를 피한다.
         rows = conn.execute(
             f"""
             SELECT
                 bucket AS server_received_at,
-                AVG(temperature) AS temperature,
-                AVG(humidity) AS humidity,
-                AVG(soil_moisture) AS soil_moisture,
-                AVG(COALESCE(light, light_digital)) AS light,
-                COUNT(*) AS bucket_count
+                SUM(temperature * sample_count) / NULLIF(SUM(CASE WHEN temperature IS NOT NULL THEN sample_count ELSE 0 END), 0) AS temperature,
+                SUM(humidity * sample_count) / NULLIF(SUM(CASE WHEN humidity IS NOT NULL THEN sample_count ELSE 0 END), 0) AS humidity,
+                SUM(soil_moisture * sample_count) / NULLIF(SUM(CASE WHEN soil_moisture IS NOT NULL THEN sample_count ELSE 0 END), 0) AS soil_moisture,
+                SUM(light * lux_count) / NULLIF(SUM(lux_count), 0) AS light,
+                SUM(lux_count) AS lux_count,
+                SUM(digital_count) AS digital_count,
+                SUM(sample_count) AS bucket_count
             FROM (
                 SELECT
                     {bucket_expr} AS bucket,
-                    temperature,
-                    humidity,
-                    soil_moisture,
-                    light,
-                    light_digital
+                    AVG(temperature) AS temperature,
+                    AVG(humidity) AS humidity,
+                    AVG(soil_moisture) AS soil_moisture,
+                    AVG(CASE WHEN light_unit = 'lux' THEN light END) AS light,
+                    SUM(CASE WHEN light_unit = 'lux' THEN 1 ELSE 0 END) AS lux_count,
+                    SUM(CASE WHEN light_unit = 'digital' THEN 1 ELSE 0 END) AS digital_count,
+                    COUNT(*) AS sample_count
                 FROM sensor_data
                 {where}
+                GROUP BY {bucket_expr}
+                {historical_sql}
             )
             WHERE bucket IS NOT NULL
             GROUP BY bucket
             ORDER BY bucket ASC
             LIMIT ?
             """,
-            params + [safe_limit],
+            params + hourly_params + [safe_limit],
         ).fetchall()
         return [_row_to_dict(row) for row in rows]
     except sqlite3.Error:
-        return []
+        raise
     finally:
         conn.close()
 
@@ -482,7 +654,9 @@ def get_sensor_stats(device_id=None, period="daily"):
                 AVG(temperature) AS temperature,
                 AVG(humidity) AS humidity,
                 AVG(soil_moisture) AS soil_moisture,
-                AVG(COALESCE(light, light_digital)) AS light,
+                AVG(CASE WHEN light_unit = 'lux' THEN light END) AS light,
+                SUM(CASE WHEN light_unit = 'lux' THEN 1 ELSE 0 END) AS light_count,
+                SUM(CASE WHEN light_unit = 'digital' THEN 1 ELSE 0 END) AS digital_light_count,
                 COUNT(*) AS count
             FROM sensor_data
             WHERE {' AND '.join(clauses)}
@@ -493,21 +667,29 @@ def get_sensor_stats(device_id=None, period="daily"):
         def rounded(value):
             return round(float(value), 1) if value is not None else None
 
+        light_count = int(row["light_count"] or 0)
+        digital_light_count = int(row["digital_light_count"] or 0)
+        if light_count and digital_light_count:
+            light_mode = "mixed"
+        elif light_count:
+            light_mode = "lux"
+        elif digital_light_count:
+            light_mode = "digital"
+        else:
+            light_mode = "none"
+
         return {
             "temperature": rounded(row["temperature"]),
             "humidity": rounded(row["humidity"]),
             "soil_moisture": rounded(row["soil_moisture"]),
             "light": rounded(row["light"]),
+            "light_mode": light_mode,
+            "light_count": light_count,
+            "digital_light_count": digital_light_count,
             "count": int(row["count"] or 0),
         }
     except sqlite3.Error:
-        return {
-            "temperature": None,
-            "humidity": None,
-            "soil_moisture": None,
-            "light": None,
-            "count": 0,
-        }
+        raise
     finally:
         conn.close()
 
@@ -527,6 +709,19 @@ def append_sensor_data(new_record):
         sensor_row_id = _insert(conn, record)
         conn.commit()
         saved = True
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        sample_id = record.get("sample_id")
+        if not sample_id:
+            raise
+        row = conn.execute(
+            "SELECT id FROM sensor_data WHERE device_id = ? AND sample_id = ?",
+            (record["device_id"], sample_id),
+        ).fetchone()
+        if row is None:
+            raise
+        sensor_row_id = row["id"]
+        saved = False
     except sqlite3.Error:
         conn.rollback()
         raise
@@ -538,6 +733,31 @@ def append_sensor_data(new_record):
         _process_alerts_after_save(record)
 
     return sensor_row_id
+
+
+def health_status():
+    """Return a small, non-secret readiness snapshot for external monitoring."""
+    result = {"database": "ok", "latest_sensor_at": None, "disk_free_bytes": None}
+    try:
+        conn = _connect()
+        try:
+            conn.execute("SELECT 1").fetchone()
+            row = conn.execute(
+                "SELECT MAX(server_received_at) FROM sensor_data"
+            ).fetchone()
+            result["latest_sensor_at"] = row[0] if row else None
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        result["database"] = "error"
+        result["error"] = type(exc).__name__
+    try:
+        result["disk_free_bytes"] = shutil.disk_usage(
+            os.path.dirname(os.path.abspath(DB_FILE))
+        ).free
+    except OSError:
+        pass
+    return result
 
 
 def filter_sensor_data(data, device_id=None):
