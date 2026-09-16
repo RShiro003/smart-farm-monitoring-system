@@ -1,26 +1,2 @@
-JavaScript / 웹 관련
-ESLint (Microsoft)
-→ JS 코드 문법 검사, 오류 체크
-Prettier - Code formatter (Prettier)
-→ 코드 자동 정렬 (JS, HTML, CSS 등)
-🔵 Git 관리
-GitLens — Git supercharged (GitKraken)
-→ git 히스토리, 변경사항, 블레임 보기
-🐍 Python 개발 핵심
-Python (Microsoft)
-→ Python 기본 지원 (실행, 인터프리터 연결)
-Pylance (Microsoft)
-→ 자동완성, 타입 분석 (거의 필수)
-Python Debugger (Microsoft)
-→ 디버깅 (브레이크포인트 등)
-Python Environments (Microsoft)
-→ 가상환경(venv, conda) 관리
-🌐 서버 / 원격 개발
-Remote - SSH (Microsoft)
-→ SSH로 원격 서버(라즈베리파이 등) 접속
-Remote - SSH: Editing Configuration Files
-→ SSH 설정파일 편집 도와줌
-Remote Explorer (Microsoft)
-→ 원격 서버 목록 관리
-⚡ API 테스트
-Thunder Client
+Flask>=3.1,<4
+waitress>=3.0,<4

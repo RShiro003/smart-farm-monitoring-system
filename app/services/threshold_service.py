@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import threading
+from contextlib import closing
 from datetime import datetime
 
 
@@ -30,8 +31,16 @@ SOIL_CALIBRATION_FIELDS = [
     "soil_wet_raw",
 ]
 
+# 조도 알림이 꺼져 있던 시절의 기본 조도 범위다.
+# 0~100은 lux로 해석하면 "어두운 실내보다 밝으면 이상"이라는 뜻이라 실제 기준이 될 수 없었고,
+# 알림이 비활성이라 아무 문제도 일으키지 않던 자리표시자였다.
+# 조도 알림을 켜면서 이 값이 남아 있으면 정상적인 lux 장치가 즉시 오탐을 내므로 마이그레이션 대상이다.
+_LEGACY_LIGHT_RANGE = (0, 100)
+
 # 장치별 임계값이 아직 저장되지 않았을 때 사용하는 초기값이다.
 # ESP32는 부팅 직후 서버에서 임계값을 가져오므로, DB에 row가 없어도 바로 LED 판단을 시작할 수 있어야 한다.
+# 조도 기본 범위는 센서 라우트가 허용하는 전체 구간(0~200000 lux)과 같다.
+# 사용자가 작물 기준을 적용하거나 직접 값을 넣기 전까지는 조도 알림이 울리지 않게 하려는 의도다.
 DEFAULT_THRESHOLDS = {
     "temperature_min": 18,
     "temperature_max": 25,
@@ -40,10 +49,15 @@ DEFAULT_THRESHOLDS = {
     "soil_moisture_min": 40,
     "soil_moisture_max": 70,
     "light_min": 0,
-    "light_max": 100,
+    "light_max": 200000,
     "soil_dry_raw": 4095,
     "soil_wet_raw": 0,
 }
+
+# PRAGMA user_version으로 스키마/데이터 마이그레이션을 한 번만 수행했는지 추적한다.
+# 버전을 두지 않으면 아래 조도 범위 보정이 재시작마다 실행되어
+# 사용자가 나중에 의도적으로 0~100을 넣어도 계속 덮어써 버린다.
+_SCHEMA_VERSION = 1
 
 # Flask 개발 서버나 브라우저/ESP32 요청이 겹칠 수 있어 임계값 DB 접근은 lock으로 직렬화한다.
 # SQLite 파일 하나를 여러 요청이 동시에 쓰면 잠금 충돌이 날 수 있기 때문이다.
@@ -57,6 +71,8 @@ def _connect():
     os.makedirs(data_dir, exist_ok=True)
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
@@ -75,7 +91,7 @@ def _ensure_table(conn):
             soil_moisture_min REAL NOT NULL DEFAULT 40,
             soil_moisture_max REAL NOT NULL DEFAULT 70,
             light_min REAL NOT NULL DEFAULT 0,
-            light_max REAL NOT NULL DEFAULT 100,
+            light_max REAL NOT NULL DEFAULT 200000,
             soil_dry_raw INTEGER NOT NULL DEFAULT 4095,
             soil_wet_raw INTEGER NOT NULL DEFAULT 0,
             updated_at TEXT NOT NULL
@@ -94,6 +110,26 @@ def _ensure_table(conn):
                 f"ALTER TABLE threshold_settings ADD COLUMN {field} "
                 f"INTEGER NOT NULL DEFAULT {DEFAULT_THRESHOLDS[field]}"
             )
+
+    # 조도 알림 활성화에 따른 일회성 데이터 보정이다.
+    # 자리표시자 범위(0~100)를 그대로 쓰던 장치만 새 기본값으로 옮겨,
+    # 기존 설치 환경이 업데이트 직후 조도 오탐으로 뒤덮이지 않게 한다.
+    # user_version으로 한 번만 실행하므로 이후 사용자가 직접 0~100을 넣으면 그대로 유지된다.
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version < _SCHEMA_VERSION:
+        conn.execute(
+            """
+            UPDATE threshold_settings
+            SET light_min = ?, light_max = ?
+            WHERE light_min = ? AND light_max = ?
+            """,
+            (
+                DEFAULT_THRESHOLDS["light_min"],
+                DEFAULT_THRESHOLDS["light_max"],
+                *_LEGACY_LIGHT_RANGE,
+            ),
+        )
+        conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
     conn.commit()
 
 
@@ -174,7 +210,7 @@ def get_or_create_thresholds(device_id):
     # 대시보드가 열릴 때와 ESP32 실제 노드가 주기적으로 호출하는 조회 함수다.
     # row가 없으면 기본값으로 생성해, 이후 같은 device_id는 항상 같은 설정을 조회하게 한다.
     with _lock:
-        with _connect() as conn:
+        with closing(_connect()) as conn:
             _ensure_table(conn)
             row = conn.execute(
                 """
@@ -195,11 +231,11 @@ def get_or_create_thresholds(device_id):
             return settings
 
 
-def upsert_thresholds(device_id, values):
+def upsert_thresholds(device_id, values, crop_id=None):
     # 대시보드 임계값 저장 버튼이 호출하는 함수다.
     # 이미 장치 row가 있으면 UPDATE, 없으면 INSERT하여 API 호출자는 같은 endpoint만 사용하면 된다.
     with _lock:
-        with _connect() as conn:
+        with closing(_connect()) as conn:
             _ensure_table(conn)
             existing = conn.execute(
                 """
@@ -253,6 +289,18 @@ def upsert_thresholds(device_id, values):
                 # 아직 서버가 모르는 새 장치라도 사용자가 설정을 먼저 저장할 수 있게 INSERT를 허용한다.
                 _insert_thresholds(conn, settings)
 
+            if crop_id is not None:
+                # 작물 기준 적용은 임계값과 장치-작물 매핑을 한 트랜잭션으로 확정한다.
+                # 둘 중 하나만 저장되어 화면과 실제 판정이 다시 어긋나는 상태를 막는다.
+                conn.execute(
+                    """
+                    INSERT INTO device_crop (device_id, crop_id)
+                    VALUES (?, ?)
+                    ON CONFLICT(device_id) DO UPDATE SET crop_id = excluded.crop_id
+                    """,
+                    (device_id, crop_id),
+                )
+
             conn.commit()
             row = conn.execute(
                 """
@@ -268,7 +316,7 @@ def upsert_thresholds(device_id, values):
 def init_threshold_db():
     # Flask 애플리케이션 import 시 기존 DB까지 마이그레이션해 첫 API 요청 전 스키마를 준비한다.
     with _lock:
-        with _connect() as conn:
+        with closing(_connect()) as conn:
             _ensure_table(conn)
 
 

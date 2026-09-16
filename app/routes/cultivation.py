@@ -93,7 +93,7 @@ def get_growth_records():
     device_id = _required_device_id(request.args.get("device_id"))
     if device_id is None:
         return jsonify({"error": "device_id is required"}), 400
-    return jsonify(list_growth_records(device_id))
+    return jsonify(list_growth_records(device_id, request.args.get("limit", 1000)))
 
 
 @cultivation_bp.route("/api/growth", methods=["POST"])

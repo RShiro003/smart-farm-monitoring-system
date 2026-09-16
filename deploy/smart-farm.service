@@ -1,0 +1,21 @@
+[Unit]
+Description=Smart Farm Monitoring System
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=smartfarm
+Group=smartfarm
+WorkingDirectory=/opt/smart-farm
+EnvironmentFile=/etc/smart-farm.env
+ExecStart=/opt/smart-farm/venv/bin/waitress-serve --host=127.0.0.1 --port=5000 app.main:app
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/smart-farm/app/data
+
+[Install]
+WantedBy=multi-user.target

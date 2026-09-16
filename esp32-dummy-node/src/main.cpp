@@ -28,7 +28,7 @@ const unsigned long ANOMALY_MAX_INTERVAL_MS = 300000;
 float currentTemperature = 24.0;
 float currentHumidity = 68.0;
 float currentSoilMoisture = 66.0;
-int currentLight = 70;
+int currentLight = 5000;
 
 // 더미 데이터가 정상값만 반복되면 임계값/대시보드 상태 표시를 검증하기 어렵다.
 // 아래 상태들은 고온, 저습도, 토양 건조 상황을 일정 시간 동안 만들어 주는 시나리오다.
@@ -201,26 +201,26 @@ int getLightTargetByMinute(int minuteOfDay) {
   // 조도는 하루 중 시간에 따라 가장 크게 달라진다.
   // 새벽/밤은 낮게, 낮 시간은 높게 만들어 차트에서 낮밤 패턴을 확인할 수 있게 한다.
   if (minuteOfDay < 0) {
-    return 70;
+    return 5000;
   }
 
   if (minuteOfDay < 360) {
-    return random(3, 16);
+    return random(20, 201);
   }
   if (minuteOfDay < 480) {
-    return 10 + (minuteOfDay - 360) * 55 / 120;
+    return 100 + (minuteOfDay - 360) * 4900 / 120;
   }
   if (minuteOfDay < 1080) {
-    return random(75, 96);
+    return random(4500, 8501);
   }
   if (minuteOfDay < 1260) {
-    return random(65, 86);
+    return random(3000, 6501);
   }
   if (minuteOfDay < 1380) {
-    return 40 - (minuteOfDay - 1260) * 30 / 120;
+    return 3000 - (minuteOfDay - 1260) * 2900 / 120;
   }
 
-  return random(3, 16);
+  return random(20, 201);
 }
 
 void generateDummySensorData() {
@@ -301,12 +301,12 @@ void generateDummySensorData() {
   }
 
   int lightTarget = getLightTargetByMinute(minuteOfDay);
-  int lightStep = clampInt(lightTarget - currentLight, -5, 5);
-  currentLight += lightStep + random(-2, 3);
-  currentLight = clampInt(currentLight, 0, 100);
+  int lightStep = clampInt(lightTarget - currentLight, -400, 400);
+  currentLight += lightStep + random(-100, 101);
+  currentLight = clampInt(currentLight, 0, 200000);
 
   if (minuteOfDay >= 0 && (minuteOfDay < 360 || minuteOfDay >= 1380)) {
-    currentLight = clampInt(currentLight, 0, 20);
+    currentLight = clampInt(currentLight, 0, 300);
   }
 
   if (activeAnomaly != ANOMALY_NONE) {
@@ -405,6 +405,10 @@ void loop() {
     // Content-Type을 JSON으로 지정해야 request.get_json()이 정상적으로 body를 파싱한다.
     http.begin(SERVER_URL);
     http.addHeader("Content-Type", "application/json");
+    // 서버가 API 키를 쓰지 않으면 빈 문자열이므로 헤더를 붙이지 않는다.
+    if (API_KEY != nullptr && strlen(API_KEY) > 0) {
+      http.addHeader("X-API-Key", API_KEY);
+    }
 
     String jsonData = "{";
     // 서버는 device_id, temperature, humidity, soil_moisture, light를 필수로 검증한다.
@@ -416,7 +420,10 @@ void loop() {
     jsonData += "\"temperature\":" + String(temperature, 2) + ",";
     jsonData += "\"humidity\":" + String(humidity, 2) + ",";
     jsonData += "\"soil_moisture\":" + String(soilMoisture) + ",";
-    jsonData += "\"light\":" + String(light);
+    jsonData += "\"light\":" + String(light) + ",";
+    // 더미 노드는 lux 단위의 조도값을 생성한다.
+    // 단위를 명시해야 서버가 조도 임계값 검사를 실제로 수행한다.
+    jsonData += "\"light_unit\":\"lux\"";
     jsonData += "}";
 
     // HTTP 응답 코드는 서버 저장 성공 여부를 확인하는 1차 신호다.

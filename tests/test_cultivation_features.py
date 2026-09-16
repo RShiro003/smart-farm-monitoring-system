@@ -83,6 +83,9 @@ class CultivationFeatureTests(unittest.TestCase):
             Path(_SENSOR_DB).resolve(),
         )
         self.assertNotEqual(Path(_SENSOR_DB).resolve(), Path(_DEFAULT_SENSOR_DB).resolve())
+        # 각 테스트 모듈이 자신의 임시 DB 스키마를 직접 준비하게 하여,
+        # 다른 모듈의 정리 순서나 운영 DB 초기화에 의존하지 않는다.
+        sensor_service._init_db()
         cultivation_service.initialize_database()
         conn = sqlite3.connect(_SENSOR_DB)
         try:
