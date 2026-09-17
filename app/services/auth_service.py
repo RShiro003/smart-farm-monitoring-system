@@ -92,12 +92,21 @@ def _presented_key():
     return None
 
 
+def _keys_match(candidate, expected):
+    if not isinstance(candidate, str) or not candidate or not expected:
+        return False
+    try:
+        return hmac.compare_digest(candidate.encode("utf-8"), expected.encode("utf-8"))
+    except UnicodeError:
+        return False
+
+
 def key_is_valid(candidate):
     expected = configured_key()
     if not expected or not candidate:
         return False
     # 타이밍 공격을 피하기 위해 길이에 무관한 비교를 쓴다.
-    return hmac.compare_digest(candidate, expected)
+    return _keys_match(candidate, expected)
 
 
 def session_cookie_value():
@@ -122,14 +131,16 @@ def session_cookie_is_valid(candidate):
     try:
         issued_raw, signature = candidate.split(".", 1)
         issued_at = int(issued_raw)
-    except (TypeError, ValueError):
+        issued_bytes = issued_raw.encode("ascii")
+        signature_bytes = signature.encode("ascii")
+    except (TypeError, ValueError, UnicodeError):
         return False
     age = int(time.time()) - issued_at
     if age < -300 or age > SESSION_MAX_AGE_SECONDS:
         return False
-    payload = _SESSION_PURPOSE + b":" + issued_raw.encode("ascii")
+    payload = _SESSION_PURPOSE + b":" + issued_bytes
     expected = hmac.new(key.encode("utf-8"), payload, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(signature, expected)
+    return hmac.compare_digest(signature_bytes, expected.encode("ascii"))
 
 
 def request_is_authorized():
@@ -157,9 +168,11 @@ def _is_device_endpoint():
 
 def _device_request_is_authorized():
     device_id = _device_request_id()
+    if not isinstance(device_id, str):
+        return False
     expected = configured_device_keys().get(device_id)
     candidate = _presented_key()
-    return bool(expected and candidate and hmac.compare_digest(candidate, expected))
+    return _keys_match(candidate, expected)
 
 
 def _requires_auth():

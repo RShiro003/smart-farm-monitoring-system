@@ -118,7 +118,10 @@ that device, and the digital-sensor firmware skips lux-based LED judgement.
 sends it to Discord. Those records are readable from the dashboard's 알림 기록
 section and from `GET /api/events` (the existing
 `GET /api/dashboard/events` path remains as a compatibility alias). Both paths
-accept `device_id`, `status`, `metric`, `date`, `time_from`, and `time_to` filters.
+accept `device_id`, `status`, `metric`, legacy single-day `date`, date-range
+`date_from` / `date_to`, and `time_from` / `time_to` filters. The dashboard uses
+the range fields so older months can be queried directly instead of paging back
+from the newest event.
 
 Device outages cannot be detected while handling `/api/sensor`, because an
 outage means that request never arrives. A background watchdog thread instead
@@ -183,12 +186,22 @@ times as purple vertical annotations on all sensor charts.
 
 `GET /api/export/sensor.csv` and `GET /api/export/events.csv` accept the same
 filters as the dashboard tables (`device_id`, `date`, `time_from`, `time_to`,
-plus `status`/`metric` for events), so a download matches what you were looking
-at. Rows are streamed one at a time rather than collected in memory, because a
+plus `date_from`/`date_to` and `status`/`metric` for events), so a download matches
+what you were looking at. Rows are streamed one at a time rather than collected in memory, because a
 wide date range at 5-second sampling is hundreds of thousands of rows. Output
 carries a UTF-8 BOM so Excel does not mangle the Korean headers, and each file
-includes the device label next to the id. A single export is capped at
-`MAX_EXPORT_ROWS` (200,000).
+includes the device label next to the id. All matching stored rows are exported;
+there is no silent 200,000-row cutoff. Large exports can take time, so use date
+and device filters when possible. Database/transfer errors interrupt the stream
+instead of being silently treated as a completed partial export.
+
+Time filters apply to the recorded local clock on each selected day. An end
+time of `10:30` includes the entire minute through `10:30:59`; API callers may
+also supply `HH:MM:SS`. A single time bound works with or without a date bound.
+Invalid or reversed ranges match no rows. An overnight interval must be queried
+as two clock intervals. Click Search after changing filters; CSV uses the applied
+table filters. Raw sensor rows already removed by retention cannot be recovered
+by CSV export; hourly rollups are not substituted for raw measurements.
 
 ## Retention and Downsampling
 
@@ -270,7 +283,7 @@ Watering detection has its own `WATERING_*` variables, listed at the top of
 | `GET` | `/api/dashboard/stats` | Period averages; lux-only light aggregation |
 | `GET` | `/api/dashboard/chart` | Bucketed chart series; digital light excluded from lux series |
 | `GET` | `/api/dashboard/history` | Paged reading history |
-| `GET` | `/api/events` | Paged alert history (`device_id`, `status`, `metric`, date/time filters) |
+| `GET` | `/api/events` | Paged alert history (`device_id`, `status`, `metric`, date range/time filters) |
 | `GET` | `/api/dashboard/events` | Compatibility alias for `/api/events` |
 | `GET` | `/api/dashboard/device-status` | Per-device online/offline state |
 | `GET` | `/api/dashboard/devices` | Known device IDs |

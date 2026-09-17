@@ -9,8 +9,10 @@ import threading
 import time
 from datetime import datetime
 from flask import Blueprint, Response, jsonify, make_response, request
+from .query_filters import event_filters
 
 try:
+    from services.validation import finite_number
     from services import device_service, export_service, retention_service, work_log_service
     from services.discord_alert_service import discord_webhook_url_is_allowed
     from services.alert_service import (
@@ -32,6 +34,7 @@ try:
     )
     from services.sensor_service import list_device_ids_from_db, normalize_device_filter
 except ModuleNotFoundError:
+    from app.services.validation import finite_number
     from app.services import device_service, export_service, retention_service, work_log_service
     from app.services.discord_alert_service import discord_webhook_url_is_allowed
     from app.services.alert_service import (
@@ -164,7 +167,7 @@ def save_alert_settings_route():
     errors = {}
     values = {}
 
-    for field in ALERT_TOGGLE_FIELDS:
+    for field in (*ALERT_TOGGLE_FIELDS, *ALERT_RULE_BOOLEAN_FIELDS):
         if field not in payload:
             continue
         value = payload[field]
@@ -172,15 +175,6 @@ def save_alert_settings_route():
             errors[field] = "must be a boolean"
             continue
         values[field] = value
-
-    for field in ALERT_RULE_BOOLEAN_FIELDS:
-        if field not in payload:
-            continue
-        value = payload[field]
-        if not isinstance(value, bool):
-            errors[field] = "must be a boolean"
-        else:
-            values[field] = value
 
     integer_rules = {
         "abnormal_count": (1, 100),
@@ -198,7 +192,7 @@ def save_alert_settings_route():
             continue
         try:
             number = int(value)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             errors[field] = "must be an integer"
             continue
         if number < minimum or number > maximum:
@@ -212,7 +206,7 @@ def save_alert_settings_route():
             errors["danger_deviation_percent"] = "must be a number"
         else:
             try:
-                number = float(value)
+                number = finite_number(value)
             except (TypeError, ValueError):
                 errors["danger_deviation_percent"] = "must be a number"
             else:
@@ -230,7 +224,7 @@ def save_alert_settings_route():
             errors["cooldown_minutes"] = "must be a number"
         else:
             try:
-                number = float(value)
+                number = finite_number(value)
             except (TypeError, ValueError):
                 errors["cooldown_minutes"] = "must be a number"
             else:
@@ -253,7 +247,12 @@ def save_alert_settings_route():
     if errors:
         return jsonify({"error": "Invalid alert settings", "details": errors}), 400
 
-    device_id = (payload.get("device_id") or "").strip()
+    device_id = payload.get("device_id")
+    if device_id is None:
+        device_id = ""
+    if not isinstance(device_id, str):
+        return jsonify({"error": "device_id must be a string"}), 400
+    device_id = device_id.strip()
     return jsonify(save_alert_settings(device_id, values))
 
 
@@ -303,7 +302,7 @@ def create_work_log():
         device_id = device_id.strip()
 
     work_type = payload.get("work_type")
-    if work_type not in work_log_service.WORK_TYPES:
+    if not isinstance(work_type, str) or work_type not in work_log_service.WORK_TYPES:
         errors["work_type"] = (
             "must be one of " + ", ".join(work_log_service.WORK_TYPES)
         )
@@ -380,12 +379,8 @@ def export_events_csv():
     labels = device_service.device_labels(list_device_ids_from_db())
     generator = export_service.stream_events_csv(
         device_id,
-        (request.args.get("status") or "").strip() or None,
-        (request.args.get("metric") or "").strip() or None,
-        (request.args.get("date") or "").strip(),
-        (request.args.get("time_from") or "").strip(),
-        (request.args.get("time_to") or "").strip(),
         labels=labels,
+        **event_filters(request.args),
     )
     return _csv_response(
         generator, export_service.export_filename("events", device_id)
@@ -407,7 +402,11 @@ def run_rollup():
 
 @management_bp.route("/api/maintenance/retention", methods=["POST"])
 def run_retention():
-    payload = request.get_json(silent=True) or {}
+    payload = request.get_json(silent=True)
+    if payload is None:
+        payload = {}
+    if not isinstance(payload, dict):
+        return jsonify({"error": "No JSON received"}), 400
     errors = {}
 
     def _optional_days(key):
@@ -419,7 +418,7 @@ def run_retention():
             return None
         try:
             number = int(value)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             errors[key] = "must be an integer"
             return None
         if number < 1 or number > 3650:

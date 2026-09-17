@@ -417,6 +417,26 @@ class DefaultLightThresholdTests(_BaseCase):
 
 
 class EventLogApiTests(_BaseCase):
+    def _insert_event_at(self, device_id, created_at, value=40):
+        conn = alert_service._connect()
+        try:
+            alert_service._ensure_tables(conn)
+            conn.execute(
+                """
+                INSERT INTO event_log (
+                    device_id, event_type, metric, value,
+                    threshold_min, threshold_max, message,
+                    status, severity, created_at
+                ) VALUES (?, 'threshold_above', 'temperature', ?,
+                          18, 25, 'historical event',
+                          'abnormal', 'warning', ?)
+                """,
+                (device_id, value, created_at),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
     def _make_events(self):
         threshold_service.upsert_thresholds(
             "esp32_01", {"temperature_min": 18, "temperature_max": 25}
@@ -478,6 +498,35 @@ class EventLogApiTests(_BaseCase):
         old = self.client.get("/api/events?date=1900-01-01").get_json()
         self.assertEqual(matching["total"], 2)
         self.assertEqual(old["total"], 0)
+
+    def test_date_range_returns_july_and_august_events_in_time_order(self):
+        # 과거 데이터를 나중에 이관해 id 순서가 발생 시각과 달라도
+        # 화면에는 실제 발생 시각 기준으로 나타나야 한다.
+        self._insert_event_at("esp32_sensor", "2025-09-01 09:00:00", 43)
+        self._insert_event_at("esp32_sensor", "2025-07-08 10:00:00", 41)
+        self._insert_event_at("esp32_sensor", "2025-08-19 11:00:00", 42)
+
+        body = self.client.get(
+            "/api/events?device_id=esp32_sensor"
+            "&date_from=2025-07-01&date_to=2025-08-31"
+        ).get_json()
+
+        self.assertEqual(body["total"], 2)
+        self.assertEqual(
+            [item["created_at"] for item in body["items"]],
+            ["2025-08-19 11:00:00", "2025-07-08 10:00:00"],
+        )
+
+    def test_reversed_or_invalid_event_date_range_returns_no_rows(self):
+        self._insert_event_at("esp32_sensor", "2025-07-08 10:00:00")
+        reversed_range = self.client.get(
+            "/api/events?date_from=2025-08-31&date_to=2025-07-01"
+        ).get_json()
+        invalid_range = self.client.get(
+            "/api/events?date_from=not-a-date&date_to=2025-08-31"
+        ).get_json()
+        self.assertEqual(reversed_range["total"], 0)
+        self.assertEqual(invalid_range["total"], 0)
 
     def test_invalid_date_filter_returns_no_rows(self):
         self._make_events()
@@ -819,6 +868,7 @@ class DashboardRenderTests(_BaseCase):
             'id="device-status-badge"',
             'id="events-tbody"',
             'id="events-pagination"',
+            'id="events-page-input"',
             'id="events-total"',
             'id="events-active"',
             'id="crop-apply-btn"',
@@ -826,11 +876,18 @@ class DashboardRenderTests(_BaseCase):
             'id="live-light-unit"',
             'id="live-light-note"',
             'id="events-filter-metric"',
-            'id="events-filter-date"',
+            'id="events-filter-date-from"',
+            'id="events-filter-date-to"',
             'id="avg-light-unit"',
             'id="light-chart-title"',
         ):
             self.assertIn(marker, html, marker)
+
+    def test_event_page_jump_validates_and_loads_requested_page(self):
+        html = self.client.get("/dashboard").get_data(as_text=True)
+        self.assertIn("function jumpToEventsPage(event)", html)
+        self.assertIn("targetPage > lastPage", html)
+        self.assertIn("loadEvents(targetPage)", html)
 
     def test_digital_device_renders_digital_unit(self):
         self._post_sensor(

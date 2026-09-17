@@ -4,6 +4,10 @@ import shutil
 import sqlite3
 from datetime import datetime, timedelta
 
+from .database import connect_database
+from .datetime_filters import datetime_conditions
+from .validation import finite_number, positive_int as _normalize_positive_int
+
 
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB_FILE = os.environ.get(
@@ -86,18 +90,7 @@ def normalize_sensor_record(record):
 # ── SQLite helpers ─────────────────────────────────────────────────────────────
 
 def _connect():
-    # SQLite 파일이 들어갈 app/data 디렉터리를 보장한다.
-    # Raspberry Pi에서 처음 실행하는 경우 DB 파일이 없어도 여기서 디렉터리 생성 후 연결된다.
-    os.makedirs(os.path.dirname(os.path.abspath(DB_FILE)), exist_ok=True)
-    conn = sqlite3.connect(DB_FILE)
-    # sqlite3.Row를 쓰면 row["temperature"]처럼 컬럼명으로 접근할 수 있어
-    # 나중에 _row_to_dict()에서 API 응답용 dict로 바꾸기 쉽다.
-    conn.row_factory = sqlite3.Row
-    # WAL 모드는 대시보드 조회와 ESP32 INSERT가 겹칠 때 잠금 충돌을 줄여 준다.
-    conn.execute("PRAGMA journal_mode=WAL")
-    # 짧은 순간 DB가 잠겨 있어도 바로 실패하지 않고 최대 5초 기다리게 한다.
-    conn.execute("PRAGMA busy_timeout=5000")
-    return conn
+    return connect_database(DB_FILE)
 
 
 def _insert(conn, record):
@@ -130,81 +123,17 @@ _TIME_EXPR = (
 )
 
 
-def _normalize_positive_int(value, default, maximum=None):
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        number = default
-    number = max(1, number)
-    if maximum is not None:
-        number = min(number, maximum)
-    return number
-
-
-def _valid_hhmm(value):
-    value = (value or "").strip()
-    if not value:
-        return ""
-    try:
-        datetime.strptime(value, "%H:%M")
-        return value
-    except ValueError:
-        return ""
-
-
-def _valid_date(value):
-    value = (value or "").strip()
-    if not value:
-        return ""
-    try:
-        datetime.strptime(value, "%Y-%m-%d")
-        return value
-    except ValueError:
-        return ""
 
 
 def _history_where(device_id=None, date=None, time_from=None, time_to=None):
-    clauses = []
-    params = []
-
+    clauses, params = datetime_conditions(
+        _TIME_EXPR, date=date, time_from=time_from, time_to=time_to
+    )
     selected = normalize_device_filter(device_id)
     if selected is not None:
-        clauses.append("device_id = ?")
-        params.append(selected)
-
-    date = (date or "").strip()
-    time_from = _valid_hhmm(time_from)
-    time_to = _valid_hhmm(time_to)
-
-    if date:
-        valid_date = _valid_date(date)
-        if not valid_date:
-            clauses.append("0 = 1")
-        else:
-            start_time = time_from or "00:00"
-            start_at = f"{valid_date} {start_time}:00"
-            clauses.append("server_received_at >= ?")
-            params.append(start_at)
-
-            if time_to:
-                clauses.append("server_received_at <= ?")
-                params.append(f"{valid_date} {time_to}:00")
-            else:
-                next_day = datetime.strptime(valid_date, "%Y-%m-%d") + timedelta(days=1)
-                clauses.append("server_received_at < ?")
-                params.append(next_day.strftime("%Y-%m-%d 00:00:00"))
-    else:
-        if time_from:
-            clauses.append(f"time({_TIME_EXPR}) >= time(?)")
-            params.append(time_from)
-
-        if time_to:
-            clauses.append(f"time({_TIME_EXPR}) <= time(?)")
-            params.append(time_to)
-
-    if not clauses:
-        return "", params
-    return " WHERE " + " AND ".join(clauses), params
+        clauses.insert(0, "device_id = ?")
+        params.insert(0, selected)
+    return (" WHERE " + " AND ".join(clauses) if clauses else ""), params
 
 
 def _period_cutoff(period, mapping, default_key):
@@ -428,7 +357,7 @@ def offline_after_seconds():
     # DEVICE_OFFLINE_SECONDS 환경변수로 현장의 전송 주기에 맞게 조정할 수 있다.
     raw = os.environ.get("DEVICE_OFFLINE_SECONDS", str(DEFAULT_OFFLINE_SECONDS))
     try:
-        seconds = float(raw)
+        seconds = finite_number(raw)
     except (TypeError, ValueError):
         return DEFAULT_OFFLINE_SECONDS
     # 0 이하를 허용하면 정상 동작 중인 장치까지 즉시 오프라인이 되므로 하한을 둔다.
@@ -679,6 +608,7 @@ def get_sensor_stats(device_id=None, period="daily"):
             light_mode = "none"
 
         return {
+            "period": period,
             "temperature": rounded(row["temperature"]),
             "humidity": rounded(row["humidity"]),
             "soil_moisture": rounded(row["soil_moisture"]),

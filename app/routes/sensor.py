@@ -1,5 +1,4 @@
 from datetime import datetime
-import math
 import re
 from time import perf_counter
 
@@ -9,6 +8,7 @@ from flask import Blueprint, jsonify, request
 # main.py에 직접 라우트를 두지 않고 이 파일로 분리해 두면,
 # ESP32가 호출하는 /api/sensor 흐름과 대시보드/임계값 흐름을 쉽게 구분할 수 있다.
 try:
+    from services.validation import finite_number as _coerce_number
     from services.sensor_service import (
         LIGHT_UNITS,
         LIGHT_UNIT_DIGITAL,
@@ -19,6 +19,7 @@ try:
         normalize_light_unit,
     )
 except ModuleNotFoundError:
+    from app.services.validation import finite_number as _coerce_number
     from app.services.sensor_service import (
         LIGHT_UNITS,
         LIGHT_UNIT_DIGITAL,
@@ -49,17 +50,6 @@ OPTIONAL_SENSOR_RANGES = {
     "soil_digital": (0, 1),
     "soil_raw": (0, 4095),
 }
-
-
-def _coerce_number(value):
-    # bool은 JSON 숫자처럼 변환될 수 있지만 센서 측정값으로는 의미가 없다.
-    # 예: true가 1로 저장되면 조도/토양 디지털 값과 혼동될 수 있으므로 명시적으로 거부한다.
-    if isinstance(value, bool):
-        raise ValueError
-    number = float(value)
-    if not math.isfinite(number):
-        raise ValueError
-    return number
 
 
 def _store_number(payload, key, value):

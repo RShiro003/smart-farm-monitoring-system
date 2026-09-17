@@ -7,7 +7,6 @@
 """
 import csv
 import io
-import sqlite3
 from datetime import datetime
 
 try:
@@ -31,10 +30,6 @@ except ModuleNotFoundError:
         _event_where,
     )
 
-
-# 내보내기 한 번에 허용하는 최대 행 수다.
-# 브라우저와 라즈베리파이 양쪽을 보호하기 위한 상한이며, 초과분은 잘린다.
-MAX_EXPORT_ROWS = 200000
 
 SENSOR_COLUMNS = [
     ("server_received_at", "수신 시각"),
@@ -109,8 +104,8 @@ def stream_sensor_csv(device_id=None, date=None, time_from=None, time_to=None,
     try:
         # fetchall() 대신 커서를 순회해 한 행씩 흘려보낸다.
         cursor = conn.execute(
-            f"SELECT * FROM sensor_data{where} ORDER BY id ASC LIMIT ?",
-            params + [MAX_EXPORT_ROWS],
+            f"SELECT * FROM sensor_data{where} ORDER BY id ASC",
+            params,
         )
         for row in cursor:
             record = dict(row)
@@ -119,17 +114,18 @@ def stream_sensor_csv(device_id=None, date=None, time_from=None, time_to=None,
                 "" if record.get(key) is None else record.get(key)
                 for key, _ in SENSOR_COLUMNS
             ])
-    except sqlite3.Error as e:
-        print(f"[Export] Sensor export failed: {e}")
     finally:
         conn.close()
 
 
 def stream_events_csv(device_id=None, status=None, metric=None, date=None,
-                      time_from=None, time_to=None, labels=None):
+                      time_from=None, time_to=None, labels=None,
+                      date_from=None, date_to=None):
     """알림 기록을 CSV 행 단위로 생성한다."""
     labels = labels or {}
-    where, params = _event_where(device_id, status, metric, date, time_from, time_to)
+    where, params = _event_where(
+        device_id, status, metric, date, time_from, time_to, date_from, date_to
+    )
 
     yield _bom() + _writer_row([title for _, title in EVENT_COLUMNS])
 
@@ -137,8 +133,9 @@ def stream_events_csv(device_id=None, status=None, metric=None, date=None,
     try:
         _ensure_alert_tables(conn)
         cursor = conn.execute(
-            f"SELECT * FROM event_log{where} ORDER BY id DESC LIMIT ?",
-            params + [MAX_EXPORT_ROWS],
+            f"SELECT * FROM event_log{where} "
+            "ORDER BY created_at DESC, id DESC",
+            params,
         )
         for row in cursor:
             metric_name = row["metric"]
@@ -169,7 +166,5 @@ def stream_events_csv(device_id=None, status=None, metric=None, date=None,
                 "" if record.get(key) is None else record.get(key)
                 for key, _ in EVENT_COLUMNS
             ])
-    except sqlite3.Error as e:
-        print(f"[Export] Event export failed: {e}")
     finally:
         conn.close()

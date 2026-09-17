@@ -1,8 +1,9 @@
 import os
-import sqlite3
 import threading
 from contextlib import closing
 from datetime import datetime
+
+from .database import connect_database
 
 
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -65,15 +66,7 @@ _lock = threading.Lock()
 
 
 def _connect():
-    # SMART_FARM_DB_FILE 환경변수를 쓰면 테스트나 배포 환경에서 임계값 DB 위치를 바꿀 수 있다.
-    # 기본값은 app/data/smart_farm.db이며, 없으면 디렉터리를 만든 뒤 SQLite에 연결한다.
-    data_dir = os.path.dirname(DB_FILE)
-    os.makedirs(data_dir, exist_ok=True)
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
-    return conn
+    return connect_database(DB_FILE)
 
 
 def _ensure_table(conn):

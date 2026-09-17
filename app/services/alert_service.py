@@ -3,6 +3,10 @@ import sqlite3
 import threading
 from datetime import datetime, timedelta
 
+from .database import connect_database
+from .datetime_filters import datetime_conditions
+from .validation import finite_number, positive_int as _normalize_positive_int
+
 try:
     from services.discord_alert_service import send_discord_message
     from services.sensor_service import LIGHT_UNIT_LUX, list_device_status, offline_after_seconds
@@ -92,12 +96,7 @@ ALERT_RULE_BOOLEAN_FIELDS = ("danger_immediate", "daily_summary", "weekly_summar
 
 
 def _connect():
-    os.makedirs(os.path.dirname(os.path.abspath(DB_FILE)), exist_ok=True)
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
-    return conn
+    return connect_database(DB_FILE)
 
 
 def _ensure_tables(conn):
@@ -181,6 +180,16 @@ def _ensure_tables(conn):
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_notification_outbox_due "
         "ON notification_outbox(status, next_attempt_at)"
+    )
+    # 오래된 월의 알림을 기간으로 조회할 때 전체 event_log를 매번 훑지 않게 한다.
+    # 장치 선택 여부에 따라 두 인덱스 중 하나를 SQLite가 고를 수 있다.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_event_log_created "
+        "ON event_log(created_at DESC, id DESC)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_event_log_device_created "
+        "ON event_log(device_id, created_at DESC, id DESC)"
     )
     conn.execute(
         """
@@ -280,7 +289,7 @@ def _env_cooldown_minutes():
     # 기존 배포는 ALERT_COOLDOWN_MINUTES 환경변수로 운영해 왔으므로 그 값을 계속 존중한다.
     raw = os.environ.get("ALERT_COOLDOWN_MINUTES", str(DEFAULT_COOLDOWN_MINUTES))
     try:
-        minutes = float(raw)
+        minutes = finite_number(raw)
     except (TypeError, ValueError):
         return DEFAULT_COOLDOWN_MINUTES
     return max(0, minutes)
@@ -295,7 +304,7 @@ def _cooldown_elapsed(last_sent_at, now, cooldown_minutes=None):
         return True
     if cooldown_minutes is None:
         cooldown_minutes = _env_cooldown_minutes()
-    return now - last_sent >= timedelta(minutes=cooldown_minutes)
+    return (now - last_sent).total_seconds() >= cooldown_minutes * 60
 
 
 # ── 알림 설정 ──────────────────────────────────────────────────────────────────
@@ -1043,92 +1052,24 @@ def process_sensor_alerts(record):
 EVENT_STATUSES = ("abnormal", "recovered")
 
 
-def _normalize_positive_int(value, default, maximum=None):
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        number = default
-    number = max(1, number)
-    if maximum is not None:
-        number = min(number, maximum)
-    return number
-
-
-def _valid_event_date(value):
-    value = (value or "").strip()
-    if not value:
-        return ""
-    try:
-        datetime.strptime(value, "%Y-%m-%d")
-        return value
-    except ValueError:
-        return None
-
-
-def _valid_event_time(value):
-    value = (value or "").strip()
-    if not value:
-        return ""
-    try:
-        datetime.strptime(value, "%H:%M")
-        return value
-    except ValueError:
-        return None
-
-
 def _event_where(
-    device_id=None,
-    status=None,
-    metric=None,
-    date=None,
-    time_from=None,
-    time_to=None,
+    device_id=None, status=None, metric=None, date=None,
+    time_from=None, time_to=None, date_from=None, date_to=None,
 ):
-    # 알림 기록 조회의 WHERE 절을 한 곳에서 만든다.
-    # 목록과 건수가 같은 조건을 써야 페이지 수 계산이 어긋나지 않는다.
-    clauses = []
-    params = []
-
+    clauses, params = datetime_conditions(
+        "created_at", date=date, time_from=time_from, time_to=time_to,
+        date_from=date_from, date_to=date_to,
+    )
     if isinstance(device_id, str) and device_id.strip():
         clauses.append("device_id = ?")
         params.append(device_id.strip())
-
     if isinstance(status, str) and status.strip() in EVENT_STATUSES:
         clauses.append("status = ?")
         params.append(status.strip())
-
     if isinstance(metric, str) and metric.strip():
         clauses.append("metric = ?")
         params.append(metric.strip())
-
-    event_date = _valid_event_date(date)
-    start_time = _valid_event_time(time_from)
-    end_time = _valid_event_time(time_to)
-    if event_date is None or start_time is None or end_time is None:
-        clauses.append("0 = 1")
-    elif event_date:
-        start_at = f"{event_date} {start_time or '00:00'}:00"
-        clauses.append("created_at >= ?")
-        params.append(start_at)
-
-        if end_time:
-            clauses.append("created_at <= ?")
-            params.append(f"{event_date} {end_time}:59")
-        else:
-            next_day = datetime.strptime(event_date, "%Y-%m-%d") + timedelta(days=1)
-            clauses.append("created_at < ?")
-            params.append(next_day.strftime("%Y-%m-%d 00:00:00"))
-    else:
-        if start_time:
-            clauses.append("time(created_at) >= time(?)")
-            params.append(start_time)
-        if end_time:
-            clauses.append("time(created_at) <= time(?)")
-            params.append(end_time)
-
-    if not clauses:
-        return "", params
-    return " WHERE " + " AND ".join(clauses), params
+    return (" WHERE " + " AND ".join(clauses) if clauses else ""), params
 
 
 def _event_row_to_dict(row):
@@ -1170,19 +1111,22 @@ def list_events(
     date=None,
     time_from=None,
     time_to=None,
+    date_from=None,
+    date_to=None,
 ):
     """알림 기록을 최신순으로 페이지 단위 조회한다."""
     page = _normalize_positive_int(page, 1)
     per_page = _normalize_positive_int(per_page, 10, maximum=200)
     where, params = _event_where(
-        device_id, status, metric, date, time_from, time_to
+        device_id, status, metric, date, time_from, time_to, date_from, date_to
     )
 
     conn = _connect()
     try:
         _ensure_tables(conn)
         rows = conn.execute(
-            f"SELECT * FROM event_log{where} ORDER BY id DESC LIMIT ? OFFSET ?",
+            f"SELECT * FROM event_log{where} "
+            "ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
             params + [per_page, (page - 1) * per_page],
         ).fetchall()
         return [_event_row_to_dict(row) for row in rows]
@@ -1200,9 +1144,11 @@ def count_events(
     date=None,
     time_from=None,
     time_to=None,
+    date_from=None,
+    date_to=None,
 ):
     where, params = _event_where(
-        device_id, status, metric, date, time_from, time_to
+        device_id, status, metric, date, time_from, time_to, date_from, date_to
     )
     conn = _connect()
     try:
@@ -1566,7 +1512,7 @@ def _offline_check_seconds():
         "DEVICE_OFFLINE_CHECK_SECONDS", str(DEFAULT_OFFLINE_CHECK_SECONDS)
     )
     try:
-        seconds = float(raw)
+        seconds = finite_number(raw)
     except (TypeError, ValueError):
         return DEFAULT_OFFLINE_CHECK_SECONDS
     # 너무 짧은 주기는 SQLite 접근만 늘리고 얻는 것이 없다.

@@ -1,8 +1,9 @@
 import json
 import os
-import sqlite3
 import threading
 from contextlib import closing
+
+from .database import connect_database
 
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB_FILE = os.environ.get(
@@ -68,13 +69,7 @@ _lock = threading.Lock()
 
 
 def _connect():
-    data_dir = os.path.dirname(DB_FILE)
-    os.makedirs(data_dir, exist_ok=True)
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
-    return conn
+    return connect_database(DB_FILE)
 
 
 def _ensure_tables(conn):
