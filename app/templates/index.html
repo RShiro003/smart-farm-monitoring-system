@@ -2181,6 +2181,7 @@ function appendTextCell(row, text, className = '') {
     cell.textContent = text;
     if (className) cell.className = className;
     row.appendChild(cell);
+    return cell;
 }
 
 function renderGrowthRecords(records) {
