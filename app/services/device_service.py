@@ -8,10 +8,11 @@ esp32_01 같은 식별자만 보여 어느 온실의 어느 자리인지 알 수
 미리 등록해 둘 수 있게 한다. 센서 원본 데이터는 건드리지 않는다.
 """
 import os
-import sqlite3
 import threading
 from contextlib import closing
 from datetime import datetime
+
+from .database import connect_database
 
 
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -31,12 +32,7 @@ _lock = threading.Lock()
 
 
 def _connect():
-    os.makedirs(os.path.dirname(os.path.abspath(DB_FILE)), exist_ok=True)
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
-    return conn
+    return connect_database(DB_FILE)
 
 
 def _ensure_tables(conn):
@@ -139,12 +135,14 @@ def list_devices(seen_device_ids=()):
             ).fetchall()
             registered = {row["device_id"]: _row_to_dict(row) for row in rows}
 
+    seen_device_ids = tuple(seen_device_ids)
+    seen = set(seen_device_ids)
     result = []
     for device_id, data in registered.items():
         entry = dict(data)
         entry["registered"] = True
         # 센서 데이터가 한 건도 없으면 아직 한 번도 통신하지 않은 장치다.
-        entry["has_data"] = device_id in set(seen_device_ids)
+        entry["has_data"] = device_id in seen
         entry["display_name"] = display_name(device_id, data.get("label"))
         result.append(entry)
 

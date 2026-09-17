@@ -3,8 +3,10 @@ from datetime import timedelta
 from time import perf_counter
 
 from flask import Blueprint, jsonify, render_template, request
+from .query_filters import event_filters
 
 try:
+    from services.validation import positive_int as _positive_int
     from services.auth_service import auth_enabled, protect_reads, request_is_authorized
     from services.alert_service import (
         count_active_alerts,
@@ -24,6 +26,7 @@ try:
         sensor_data_mtime,
     )
 except ModuleNotFoundError:
+    from app.services.validation import positive_int as _positive_int
     from app.services.auth_service import (
         auth_enabled,
         protect_reads,
@@ -50,20 +53,17 @@ except ModuleNotFoundError:
 
 dashboard_bp = Blueprint("dashboard", __name__)
 
+CHART_PERIODS = {"hourly", "daily", "weekly", "monthly"}
+STATS_PERIODS = {"daily", "weekly", "monthly"}
+
 
 def _selected_device_id():
     return normalize_device_filter(request.args.get("device_id"))
 
 
-def _positive_int(value, default, maximum=None):
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        number = default
-    number = max(1, number)
-    if maximum is not None:
-        number = min(number, maximum)
-    return number
+def _period_arg(allowed, default):
+    period = request.args.get("period", default)
+    return period if period in allowed else default
 
 
 def _log_api(name, start, **details):
@@ -134,6 +134,7 @@ def _aggregate_chart(rows, period):
         light_mode = "none"
 
     return {
+        "period": period,
         "labels": labels,
         "temperature": [_avg(groups[label], "temperature") for label in labels],
         "humidity": [_avg(groups[label], "humidity") for label in labels],
@@ -142,6 +143,8 @@ def _aggregate_chart(rows, period):
         "light_mode": light_mode,
         "light_count": lux_count,
         "digital_light_count": digital_count,
+        "sample_count": sum(int(row.get("bucket_count") or 0) for row in rows),
+        "bucket_count": len(labels),
     }
 
 
@@ -162,7 +165,7 @@ def dashboard():
 @dashboard_bp.route("/api/dashboard/stats")
 def dashboard_stats():
     start = perf_counter()
-    period = request.args.get("period", "daily")
+    period = _period_arg(STATS_PERIODS, "daily")
     result = get_sensor_stats(_selected_device_id(), period)
     _log_api("stats", start, period=period, count=result.get("count", 0))
     return jsonify(result)
@@ -171,7 +174,7 @@ def dashboard_stats():
 @dashboard_bp.route("/api/dashboard/chart")
 def dashboard_chart():
     start = perf_counter()
-    period = request.args.get("period", "hourly")
+    period = _period_arg(CHART_PERIODS, "hourly")
     limit = _positive_int(request.args.get("limit"), 300, maximum=5000)
     rows = get_sensor_rows_for_chart(_selected_device_id(), period, limit)
     result = _aggregate_chart(rows, period)
@@ -272,27 +275,17 @@ def dashboard_events():
     start = perf_counter()
     page = _positive_int(request.args.get("page"), 1)
     per_page = _positive_int(request.args.get("per_page"), 10, maximum=200)
-    status = (request.args.get("status") or "").strip() or None
-    metric = (request.args.get("metric") or "").strip() or None
-    date_str = (request.args.get("date") or "").strip()
-    time_from = (request.args.get("time_from") or "").strip()
-    time_to = (request.args.get("time_to") or "").strip()
+    filters = event_filters(request.args)
     device_id = _selected_device_id()
 
-    total = count_events(
-        device_id, status, metric, date_str, time_from, time_to
-    )
+    total = count_events(device_id, **filters)
     pages = max(1, (total + per_page - 1) // per_page)
     page = min(page, pages)
     items = list_events(
         device_id,
         page,
         per_page,
-        status,
-        metric,
-        date_str,
-        time_from,
-        time_to,
+        **filters,
     )
 
     _log_api("events", start, total=total, page=page)

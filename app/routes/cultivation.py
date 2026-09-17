@@ -1,9 +1,9 @@
-import math
 from decimal import Decimal, InvalidOperation
 
 from flask import Blueprint, jsonify, request
 
 try:
+    from services.validation import finite_number
     from services.cultivation_service import (
         backfill_watering_events,
         create_growth_record,
@@ -13,6 +13,7 @@ try:
         list_watering_events,
     )
 except ModuleNotFoundError:
+    from app.services.validation import finite_number
     from app.services.cultivation_service import (
         backfill_watering_events,
         create_growth_record,
@@ -42,11 +43,11 @@ def _optional_non_negative_number(payload, key, errors):
         errors[key] = "must be a non-negative number"
         return None
     try:
-        value = float(value)
+        value = finite_number(value)
     except (TypeError, ValueError):
         errors[key] = "must be a non-negative number"
         return None
-    if not math.isfinite(value) or value < 0:
+    if value < 0:
         errors[key] = "must be a non-negative number"
         return None
     return value

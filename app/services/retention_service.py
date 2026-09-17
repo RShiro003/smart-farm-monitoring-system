@@ -39,7 +39,7 @@ def _env_int(name, default, minimum=1):
         return default
     try:
         value = int(float(raw))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
     return value if value >= minimum else default
 

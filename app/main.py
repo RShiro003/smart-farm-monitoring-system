@@ -1,4 +1,3 @@
-import math
 import logging
 import os
 import sqlite3
@@ -13,6 +12,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 # main.py에는 앱 생성, Blueprint 등록과 기존 공통 설정 API만 남겨
 # "어떤 라우트가 어디에 있는지"를 명확히 분리한다.
 try:
+    from services.validation import finite_number as _coerce_number
     from routes.dashboard import dashboard_bp
     from routes.sensor import sensor_bp
     from routes.cultivation import cultivation_bp
@@ -45,6 +45,7 @@ try:
         set_device_crop,
     )
 except ModuleNotFoundError:
+    from app.services.validation import finite_number as _coerce_number
     from app.routes.dashboard import dashboard_bp
     from app.routes.sensor import sensor_bp
     from app.routes.cultivation import cultivation_bp
@@ -162,17 +163,6 @@ THRESHOLD_RANGES = {
     "soil_moisture": (0, 100),
     "light": (0, 200000),
 }
-
-
-def _coerce_number(value):
-    # JSON에서는 true/false도 숫자처럼 처리될 수 있으므로 임계값에는 허용하지 않는다.
-    # ESP32와 대시보드는 임계값을 실제 센서 범위 비교에 사용하므로 명시적인 숫자만 받는다.
-    if isinstance(value, bool):
-        raise ValueError
-    number = float(value)
-    if not math.isfinite(number):
-        raise ValueError
-    return number
 
 
 def _normalize_required_device_id(value):
@@ -359,12 +349,7 @@ def apply_crop_thresholds():
 
 # ── Crop profile API ──────────────────────────────────────────────────────────
 
-_CROP_PAIRS = [
-    ("temperature_min", "temperature_max"),
-    ("humidity_min", "humidity_max"),
-    ("soil_moisture_min", "soil_moisture_max"),
-    ("light_min", "light_max"),
-]
+_CROP_PAIRS = THRESHOLD_PAIRS
 
 
 def _validate_crop_payload(payload):
@@ -384,13 +369,7 @@ def _validate_crop_payload(payload):
             errors[key] = "required"
             continue
         try:
-            v = payload[key]
-            if isinstance(v, bool):
-                raise ValueError
-            v = float(v)
-            if not math.isfinite(v):
-                raise ValueError
-            data[key] = int(v) if v.is_integer() else v
+            _store_threshold_number(data, key, _coerce_number(payload[key]))
         except (TypeError, ValueError):
             errors[key] = "must be a number"
 
@@ -481,11 +460,12 @@ def set_crop_for_device():
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
         return jsonify({"error": "No JSON received"}), 400
-    device_id = (payload.get("device_id") or "").strip()
+    device_id = payload.get("device_id")
+    device_id = device_id.strip() if isinstance(device_id, str) else None
     crop_id = payload.get("crop_id")
     if not device_id:
         return jsonify({"error": "device_id required"}), 400
-    if not isinstance(crop_id, int):
+    if isinstance(crop_id, bool) or not isinstance(crop_id, int):
         return jsonify({"error": "crop_id must be an integer"}), 400
     result = set_device_crop(device_id, crop_id)
     if not result:

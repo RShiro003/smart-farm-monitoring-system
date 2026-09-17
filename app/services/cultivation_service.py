@@ -5,6 +5,8 @@ from collections import deque
 from datetime import datetime, timedelta
 from statistics import median
 
+from .database import connect_database
+
 
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB_FILE = os.environ.get(
@@ -95,12 +97,7 @@ WATERING_QUERY_LIMIT = (
 
 
 def _connect():
-    os.makedirs(os.path.dirname(os.path.abspath(DB_FILE)), exist_ok=True)
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
-    return conn
+    return connect_database(DB_FILE)
 
 
 def _ensure_tables(conn):

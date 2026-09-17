@@ -4,6 +4,8 @@
 기존 테스트 모듈과 같은 방식으로 임시 DB를 쓴다.
 """
 import gc
+import csv
+import io
 import os
 import sqlite3
 import sys
@@ -32,6 +34,7 @@ from app.services import (  # noqa: E402
     crop_service,
     cultivation_service,
     device_service,
+    export_service,
     retention_service,
     sensor_service,
     threshold_service,
@@ -398,6 +401,39 @@ class CsvExportTests(_BaseCase):
         text = self.client.get("/api/export/events.csv").get_data(as_text=True)
         self.assertIn("발생 시각", text)
 
+    def test_events_csv_uses_dashboard_date_range(self):
+        conn = alert_service._connect()
+        try:
+            alert_service._ensure_tables(conn)
+            for created_at, value in (
+                ("2025-07-08 10:00:00", 41),
+                ("2025-08-19 11:00:00", 42),
+                ("2025-09-01 09:00:00", 43),
+            ):
+                conn.execute(
+                    """
+                    INSERT INTO event_log (
+                        device_id, event_type, metric, value,
+                        threshold_min, threshold_max, message,
+                        status, severity, created_at
+                    ) VALUES ('esp32_sensor', 'threshold_above', 'temperature', ?,
+                              18, 25, 'historical event',
+                              'abnormal', 'warning', ?)
+                    """,
+                    (value, created_at),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+        text = self.client.get(
+            "/api/export/events.csv?device_id=esp32_sensor"
+            "&date_from=2025-07-01&date_to=2025-08-31"
+        ).get_data(as_text=True)
+        self.assertIn("2025-07-08", text)
+        self.assertIn("2025-08-19", text)
+        self.assertNotIn("2025-09-01", text)
+
     def test_export_streams_without_loading_all_rows(self):
         # 생성기를 그대로 전달하므로 응답이 스트리밍 모드여야 한다.
         self._post_sensor()
@@ -411,6 +447,126 @@ class CsvExportTests(_BaseCase):
 
 
 # ── ⑤ 데이터 보존 / 다운샘플링 ─────────────────────────────────────────────────
+
+class CsvAndTimeRegressionTests(_BaseCase):
+    def _seed_times(self):
+        stamps = [f"2025-{month:02d}-08 {clock}" for month in (7, 8)
+                  for clock in ("09:59:59", "10:00:00", "10:30:00", "10:30:59", "10:31:00", "15:00:00")]
+        conn = alert_service._connect()
+        try:
+            alert_service._ensure_tables(conn)
+            conn.executemany("INSERT INTO sensor_data (device_id, server_received_at) VALUES ('esp32_sensor', ?)",
+                             ((stamp,) for stamp in stamps))
+            conn.executemany(
+                "INSERT INTO event_log (device_id, metric, event_type, status, message, created_at) "
+                "VALUES ('esp32_sensor', 'temperature', 'threshold_above', 'abnormal', 'test', ?)",
+                ((stamp,) for stamp in stamps),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return stamps
+
+    def _assert_table_and_csv(self, kind, query, expected):
+        query = dict(query, device_id="esp32_sensor")
+        path = "/api/dashboard/history" if kind == "sensor" else "/api/events"
+        response = self.client.get(path, query_string=dict(query, per_page=200))
+        body = response.get_json()
+        self.assertEqual(body["total"], len(expected))
+        field = "server_received_at" if kind == "sensor" else "created_at"
+        self.assertEqual(sorted(item[field] for item in body["items"]), sorted(expected))
+        exported = self.client.get(f"/api/export/{kind}.csv", query_string=query)
+        rows = list(csv.reader(io.StringIO(exported.get_data(as_text=True).lstrip("\ufeff"))))
+        self.assertEqual(sorted(row[0] for row in rows[1:]), sorted(expected))
+        exported.close()
+
+    def test_end_minute_is_included_with_date_and_without_date(self):
+        stamps = self._seed_times()
+        for kind in ("sensor", "events"):
+            for day in (None, "2025-08-08"):
+                with self.subTest(kind=kind, day=day):
+                    query = {"time_from": "10:00", "time_to": "10:30"}
+                    if day:
+                        query["date"] = day
+                    expected = [s for s in stamps if "10:00" <= s[11:16] <= "10:30" and (not day or s[:10] == day)]
+                    self._assert_table_and_csv(kind, query, expected)
+
+    def test_same_minute_and_second_precision(self):
+        stamps = self._seed_times()
+        for kind in ("sensor", "events"):
+            for clock in ("10:30", "10:30:59"):
+                with self.subTest(kind=kind, clock=clock):
+                    expected = [s for s in stamps if s[11:11 + len(clock)] == clock]
+                    self._assert_table_and_csv(kind, {"time_from": clock, "time_to": clock}, expected)
+
+    def test_time_applies_to_every_day_of_event_date_range(self):
+        stamps = self._seed_times()
+        self._assert_table_and_csv("events", {
+            "date_from": "2025-07-01", "date_to": "2025-08-31", "time_from": "10:00", "time_to": "10:30",
+        }, [s for s in stamps if "10:00" <= s[11:16] <= "10:30"])
+
+    def test_one_sided_date_does_not_drop_opposite_time_bound(self):
+        stamps = self._seed_times()
+        self._assert_table_and_csv("events", {"date_from": "2025-08-01", "time_to": "10:30"},
+                                   [s for s in stamps if s[:10] >= "2025-08-01" and s[11:16] <= "10:30"])
+        self._assert_table_and_csv("events", {"date_to": "2025-07-31", "time_from": "10:30"},
+                                   [s for s in stamps if s[:10] <= "2025-07-31" and s[11:16] >= "10:30"])
+
+    def test_invalid_or_reversed_time_never_broadens_results(self):
+        self._seed_times()
+        for kind in ("sensor", "events"):
+            for query in ({"time_from": "invalid"}, {"time_to": "24:00"},
+                          {"time_from": "15:00", "time_to": "10:00"}):
+                with self.subTest(kind=kind, query=query):
+                    self._assert_table_and_csv(kind, query, [])
+
+    def test_sensor_date_filter_uses_same_legacy_timestamp_as_time_filter(self):
+        self._insert_row_at("esp32_sensor", "", time="2025-08-08T10:30:59")
+        query = {"device_id": "esp32_sensor", "date": "2025-08-08", "time_from": "10:30", "time_to": "10:30"}
+        body = self.client.get("/api/dashboard/history", query_string=query).get_json()
+        self.assertEqual(body["total"], 1)
+        response = self.client.get("/api/export/sensor.csv", query_string=query)
+        self.assertEqual(len(list(csv.reader(io.StringIO(response.get_data(as_text=True))))), 2)
+        response.close()
+
+    def test_sensor_export_includes_august_after_200000_july_rows(self):
+        conn = sensor_service._connect()
+        try:
+            conn.executemany("INSERT INTO sensor_data (device_id, server_received_at) VALUES (?, ?)",
+                             (("esp32_sensor", "2025-07-08 10:00:00") for _ in range(200000)))
+            conn.execute("INSERT INTO sensor_data (device_id, server_received_at) VALUES ('esp32_sensor', '2025-08-08 10:30:59')")
+            conn.commit()
+        finally:
+            conn.close()
+        count = 0
+        for line in export_service.stream_sensor_csv("esp32_sensor"):
+            count += 1
+        self.assertEqual(count, 200002)  # Header + every stored row.
+        self.assertIn("2025-08-08", line)
+
+    def test_event_export_does_not_truncate_at_200000_rows(self):
+        conn = alert_service._connect()
+        try:
+            alert_service._ensure_tables(conn)
+            conn.executemany(
+                "INSERT INTO event_log (device_id, metric, event_type, status, message, created_at) "
+                "VALUES ('esp32_sensor', 'temperature', 'threshold_above', 'abnormal', 'test', ?)",
+                (("2025-08-08 10:00:00",) for _ in range(200001)),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self.assertEqual(sum(1 for _ in export_service.stream_events_csv("esp32_sensor")), 200002)
+
+    def test_csv_query_failure_propagates_and_closes_connection(self):
+        with mock.patch.object(sensor_service, "_connect") as connect:
+            connect.return_value.execute.side_effect = sqlite3.OperationalError("test failure")
+            stream = export_service.stream_sensor_csv()
+            next(stream)  # Header.
+            with self.assertRaises(sqlite3.OperationalError):
+                next(stream)
+            connect.return_value.close.assert_called_once()
+
 
 class RetentionTests(_BaseCase):
     def _old(self, hours):
@@ -673,6 +829,52 @@ class DashboardRenderTests(_BaseCase):
             404,
         )
 
+    def test_period_apis_return_the_period_the_server_applied(self):
+        for period in ("daily", "weekly", "monthly"):
+            body = self.client.get(
+                f"/api/dashboard/stats?period={period}"
+            ).get_json()
+            self.assertEqual(body["period"], period)
+
+        for period in ("hourly", "daily", "weekly", "monthly"):
+            body = self.client.get(
+                f"/api/dashboard/chart?period={period}"
+            ).get_json()
+            self.assertEqual(body["period"], period)
+
+    def test_period_statistics_use_different_time_windows(self):
+        now = datetime.now()
+        samples = (
+            (now - timedelta(hours=2), 10),
+            (now - timedelta(days=2), 20),
+            (now - timedelta(days=10), 40),
+        )
+        for received_at, temperature in samples:
+            self._insert_row_at(
+                "esp32_01", received_at, temperature=temperature,
+                humidity=temperature, soil_moisture=temperature,
+                light=temperature, light_unit="lux",
+            )
+
+        daily = self.client.get(
+            "/api/dashboard/stats?device_id=esp32_01&period=daily"
+        ).get_json()
+        weekly = self.client.get(
+            "/api/dashboard/stats?device_id=esp32_01&period=weekly"
+        ).get_json()
+        monthly = self.client.get(
+            "/api/dashboard/stats?device_id=esp32_01&period=monthly"
+        ).get_json()
+
+        self.assertEqual((daily["count"], daily["temperature"]), (1, 10.0))
+        self.assertEqual((weekly["count"], weekly["temperature"]), (2, 15.0))
+        self.assertEqual((monthly["count"], monthly["temperature"]), (3, 23.3))
+
+    def test_dashboard_discards_late_period_responses(self):
+        html = self.client.get("/dashboard").get_data(as_text=True)
+        self.assertIn("period !== currentChartPeriod || data.period !== period", html)
+        self.assertIn("period !== currentAvgPeriod || d.period !== period", html)
+
 
 class AlertConfirmationSummaryAndWorkLogTests(_BaseCase):
     def _events(self, status=None):
@@ -922,6 +1124,129 @@ class HardeningRegressionTests(_BaseCase):
         rows = cultivation_service.get_daily_analysis("esp32_01", days=365)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["temperature_avg"], 23)
+
+
+class RefactoringRegressionTests(_BaseCase):
+    def test_database_wrappers_resolve_paths_at_call_time(self):
+        for module in _PINNED:
+            with self.subTest(module=module.__name__):
+                with mock.patch.object(module, "DB_FILE", "test-override.db"):
+                    with mock.patch.object(module, "connect_database") as connect:
+                        self.assertIs(module._connect(), connect.return_value)
+                        connect.assert_called_once_with("test-override.db")
+
+    def test_alert_settings_reject_non_finite_values_without_saving(self):
+        for field in ("cooldown_minutes", "danger_deviation_percent", "abnormal_count"):
+            for value in (float("nan"), float("inf"), -float("inf"), "NaN", "Infinity"):
+                with self.subTest(field=field, value=value):
+                    with mock.patch("app.routes.management.save_alert_settings") as save:
+                        response = self.client.put("/api/alert-settings", json={field: value})
+                        self.assertEqual(response.status_code, 400)
+                        save.assert_not_called()
+
+    def test_alert_settings_reject_non_string_device_without_saving(self):
+        for value in ([], {}, 0, False, 42, ["esp32_01"]):
+            with self.subTest(value=value):
+                with mock.patch("app.routes.management.save_alert_settings") as save:
+                    response = self.client.put("/api/alert-settings", json={"device_id": value})
+                    self.assertEqual(response.status_code, 400)
+                    save.assert_not_called()
+
+    def test_alert_settings_keep_null_global_and_numeric_string_compatibility(self):
+        response = self.client.put("/api/alert-settings", json={
+            "device_id": None, "cooldown_minutes": "12.5", "abnormal_count": "3",
+        })
+        self.assertEqual(response.status_code, 200)
+        settings = alert_service.get_alert_settings()
+        self.assertEqual(settings["cooldown_minutes"], 12.5)
+        self.assertEqual(settings["abnormal_count"], 3)
+
+    def test_malformed_retention_payload_never_runs_maintenance(self):
+        for payload in ([], ["raw_days"], False, 0, "", "invalid"):
+            with self.subTest(payload=payload):
+                with mock.patch.object(retention_service, "run_maintenance") as maintenance:
+                    response = self.client.post("/api/maintenance/retention", json=payload)
+                    self.assertEqual(response.status_code, 400)
+                    maintenance.assert_not_called()
+
+    def test_non_finite_retention_days_never_run_maintenance(self):
+        for value in (float("inf"), float("nan"), -float("inf")):
+            with self.subTest(value=value):
+                with mock.patch.object(retention_service, "run_maintenance") as maintenance:
+                    response = self.client.post("/api/maintenance/retention", json={"raw_days": value})
+                    self.assertEqual(response.status_code, 400)
+                    maintenance.assert_not_called()
+
+    def test_work_type_containers_return_validation_error(self):
+        for value in ([], {}, ["watering"]):
+            response = self.client.post("/api/work-logs", json={
+                "device_id": "esp32_01", "work_type": value,
+            })
+            self.assertEqual(response.status_code, 400)
+
+    def test_crop_assignment_rejects_invalid_types(self):
+        for payload in ({"device_id": [], "crop_id": 1},
+                        {"device_id": {}, "crop_id": 1},
+                        {"device_id": 42, "crop_id": 1},
+                        {"device_id": "esp32_01", "crop_id": True}):
+            with self.subTest(payload=payload):
+                self.assertEqual(self.client.put("/api/crops/device", json=payload).status_code, 400)
+
+    def test_huge_growth_value_returns_validation_error(self):
+        response = self.client.post("/api/growth", json={
+            "device_id": "esp32_01", "height_cm": 10**400,
+        })
+        self.assertEqual(response.status_code, 400)
+
+    def test_auth_rejects_container_device_ids_without_server_error(self):
+        env = {"SMART_FARM_API_KEY": "admin", "SMART_FARM_DEVICE_KEYS": '{"esp32_01":"node"}'}
+        with mock.patch.dict(os.environ, env):
+            for value in ([], {}, ["esp32_01"]):
+                for key, expected_status in (("node", 401), ("admin", 400)):
+                    with self.subTest(value=value, key=key):
+                        response = self.client.post("/api/sensor", json={"device_id": value},
+                                                    headers={"X-API-Key": key})
+                        self.assertEqual(response.status_code, expected_status)
+
+    def test_non_ascii_key_comparison_is_safe(self):
+        with mock.patch.dict(os.environ, {"SMART_FARM_API_KEY": "secret"}):
+            for value in ("잘못된키", "\ud800", [], None):
+                self.assertFalse(auth_service.key_is_valid(value))
+        with mock.patch.dict(os.environ, {"SMART_FARM_API_KEY": "테스트키"}):
+            self.assertTrue(auth_service.key_is_valid("테스트키"))
+
+    def test_malformed_and_expired_sessions_are_rejected(self):
+        with mock.patch.dict(os.environ, {"SMART_FARM_API_KEY": "secret"}):
+            with mock.patch.object(auth_service.time, "time", return_value=1700000000):
+                token = auth_service.session_cookie_value()
+                self.assertTrue(auth_service.session_cookie_is_valid(token))
+                issued, signature = token.split(".")
+                unicode_digits = "".join(chr(ord(c) + 0xFEE0) for c in issued)
+                for invalid in (f"{issued}.서명", f"{unicode_digits}.{signature}", "bad", [], None):
+                    self.assertFalse(auth_service.session_cookie_is_valid(invalid))
+            with mock.patch.object(auth_service.time, "time", return_value=1700000000 + 43201):
+                self.assertFalse(auth_service.session_cookie_is_valid(token))
+
+    def test_device_list_accepts_one_shot_iterables(self):
+        device_service.upsert_device("registered")
+        devices = device_service.list_devices(iter(["registered", "unregistered"]))
+        self.assertEqual({item["device_id"] for item in devices}, {"registered", "unregistered"})
+        self.assertTrue(all(item["has_data"] for item in devices))
+
+    def test_non_finite_environment_intervals_use_defaults(self):
+        for value in ("nan", "inf", "-inf", "invalid"):
+            with mock.patch.dict(os.environ, {
+                "ALERT_COOLDOWN_MINUTES": value,
+                "DEVICE_OFFLINE_SECONDS": value,
+                "DEVICE_OFFLINE_CHECK_SECONDS": value,
+            }):
+                self.assertEqual(alert_service._env_cooldown_minutes(), alert_service.DEFAULT_COOLDOWN_MINUTES)
+                self.assertEqual(sensor_service.offline_after_seconds(), sensor_service.DEFAULT_OFFLINE_SECONDS)
+                self.assertEqual(alert_service._offline_check_seconds(), alert_service.DEFAULT_OFFLINE_CHECK_SECONDS)
+                self.assertEqual(retention_service._env_int("DEVICE_OFFLINE_SECONDS", 90), 90)
+
+    def test_very_large_cooldown_does_not_overflow_timedelta(self):
+        self.assertFalse(alert_service._cooldown_elapsed("2026-01-01 00:00:00", datetime(2026, 1, 2), 1e100))
 
 
 if __name__ == "__main__":
