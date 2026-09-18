@@ -10,10 +10,48 @@ from unittest import mock
 
 from app.routes.query_filters import event_filters
 from app.services.database import connect_database
-from app.services.validation import finite_number, positive_int
+from app.services.validation import finite_number, positive_int, required_device_id
+from app.services.datetime_filters import datetime_conditions
 
 
 class SharedHelperTests(unittest.TestCase):
+    def test_device_id_normalization_preserves_existing_rules(self):
+        for value in (None, False, 0, 123, [], {}, "", " \t\n"):
+            with self.subTest(value=value):
+                self.assertIsNone(required_device_id(value))
+        for value, expected in ((" esp32_01 ", "esp32_01"), ("a b", "a b"),
+                                ("장치", "장치"), ("x" * 100, "x" * 100)):
+            self.assertEqual(required_device_id(value), expected)
+
+    def test_datetime_filters_cover_leap_day_and_maximum_date(self):
+        conn = sqlite3.connect(":memory:")
+        try:
+            conn.execute("CREATE TABLE samples (stamp TEXT)")
+            conn.executemany("INSERT INTO samples VALUES (?)", [
+                ("2024-02-29 23:59:59.500",), ("2024-03-01 00:00:00",),
+                ("9999-12-31 23:59:59.999999",),
+            ])
+            for query, expected in (({"date": "2024-02-29", "time_to": "23:59"}, 1),
+                                    ({"date": "2026-02-29"}, 0),
+                                    ({"date": "9999-12-31"}, 1),
+                                    ({"date_from": "2026-08-25", "date_to": "2026-07-25"}, 0)):
+                with self.subTest(query=query):
+                    clauses, params = datetime_conditions("stamp", **query)
+                    result = conn.execute("SELECT COUNT(*) FROM samples WHERE " + " AND ".join(clauses), params).fetchone()[0]
+                    self.assertEqual(result, expected)
+        finally:
+            conn.close()
+
+    def test_mixed_time_precision_keeps_end_minute_inclusive(self):
+        conn = sqlite3.connect(":memory:")
+        try:
+            for query, expected in (({"time_from": "10:30:59", "time_to": "10:30"}, 1),
+                                    ({"time_from": "10:31", "time_to": "10:30:59"}, 0)):
+                clauses, params = datetime_conditions("'2026-08-25 10:30:59.500'", **query)
+                self.assertEqual(conn.execute("SELECT COUNT(*) WHERE " + " AND ".join(clauses), params).fetchone()[0], expected)
+        finally:
+            conn.close()
+
     def test_both_application_import_modes_use_isolated_databases(self):
         root = Path(__file__).resolve().parents[1]
         for working_dir, module in ((root, "app.main"), (root / "app", "main")):

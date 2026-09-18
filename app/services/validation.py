@@ -2,6 +2,13 @@
 import math
 
 
+def required_device_id(value):
+    """Trim a nonempty string; endpoint-specific length/range rules stay local."""
+    if not isinstance(value, str):
+        return None
+    return value.strip() or None
+
+
 def finite_number(value):
     """Accept numeric strings as before, but never booleans, NaN or infinity."""
     if isinstance(value, bool):

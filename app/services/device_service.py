@@ -13,6 +13,7 @@ from contextlib import closing
 from datetime import datetime
 
 from .database import connect_database
+from .validation import required_device_id as normalize_device_id
 
 
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -63,13 +64,6 @@ initialize_database()
 
 def _now_string():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
-def normalize_device_id(value):
-    if not isinstance(value, str):
-        return None
-    value = value.strip()
-    return value or None
 
 
 def _clean_text(value, max_length):

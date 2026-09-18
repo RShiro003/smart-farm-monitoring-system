@@ -3,7 +3,7 @@ from decimal import Decimal, InvalidOperation
 from flask import Blueprint, jsonify, request
 
 try:
-    from services.validation import finite_number
+    from services.validation import finite_number, required_device_id as _required_device_id
     from services.cultivation_service import (
         backfill_watering_events,
         create_growth_record,
@@ -13,7 +13,7 @@ try:
         list_watering_events,
     )
 except ModuleNotFoundError:
-    from app.services.validation import finite_number
+    from app.services.validation import finite_number, required_device_id as _required_device_id
     from app.services.cultivation_service import (
         backfill_watering_events,
         create_growth_record,
@@ -26,13 +26,6 @@ except ModuleNotFoundError:
 
 cultivation_bp = Blueprint("cultivation", __name__)
 SQLITE_INTEGER_MAX = 2**63 - 1
-
-
-def _required_device_id(value):
-    if not isinstance(value, str):
-        return None
-    value = value.strip()
-    return value or None
 
 
 def _optional_non_negative_number(payload, key, errors):
