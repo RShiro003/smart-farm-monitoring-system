@@ -1,6 +1,9 @@
 venv/
 .env
 __pycache__/
+*.py[cod]
+.claude/
+outputs/
 app/data/*.json
 app/data/*.db
 app/data/*.db-*

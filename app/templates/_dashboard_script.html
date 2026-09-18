@@ -1496,14 +1496,12 @@ function renderHistoryTable(items, page, perPage) {
     }
 }
 
-function renderPagination(page, pages, total) {
-    // 기록 수가 많아도 화면이 길어지지 않게 페이지 버튼을 압축해서 렌더링한다.
-    // 현재 페이지 주변과 첫/마지막 페이지만 보여주고 중간은 생략 기호로 표시한다.
-    const el = document.getElementById('pagination');
-
+function paginationMarkup(page, pages, total, loadPage) {
+    // 호출 함수명은 아래 두 렌더러의 고정값이다. 사용자 입력은 받지 않는다.
+    // 전체 페이지 수와 무관하게 첫/마지막 및 현재 주변 최대 7개만 순회한다.
     const btn = (label, p, active = false, disabled = false) =>
         `<button class="page-btn${active ? ' active' : ''}" ${disabled ? 'disabled' : ''}
-            onclick="${disabled || active ? '' : `loadHistory(${p})`}">${label}</button>`;
+            onclick="${disabled || active ? '' : `${loadPage}(${p})`}">${label}</button>`;
 
     let html = btn('‹', page - 1, false, page === 1);
 
@@ -1511,19 +1509,26 @@ function renderPagination(page, pages, total) {
         html += btn(1, 1, true);
     } else {
         const delta = 2;
+        const visiblePages = new Set([1, pages]);
+        for (let p = Math.max(1, page - delta); p <= Math.min(pages, page + delta); p++) {
+            visiblePages.add(p);
+        }
         let prev = -1;
-        for (let p = 1; p <= pages; p++) {
-            if (p === 1 || p === pages || (p >= page - delta && p <= page + delta)) {
-                if (prev !== -1 && p - prev > 1) html += `<span class="page-info">…</span>`;
-                html += btn(p, p, p === page);
-                prev = p;
-            }
+        for (const p of [...visiblePages].sort((a, b) => a - b)) {
+            if (prev !== -1 && p - prev > 1) html += `<span class="page-info">…</span>`;
+            html += btn(p, p, p === page);
+            prev = p;
         }
     }
 
     html += btn('›', page + 1, false, page === pages);
     html += `<span class="page-info">총 ${total}건</span>`;
-    el.innerHTML = html;
+    return html;
+}
+
+function renderPagination(page, pages, total) {
+    document.getElementById('pagination').innerHTML =
+        paginationMarkup(page, pages, total, 'loadHistory');
 }
 
 function searchHistory() {
@@ -1730,28 +1735,7 @@ function renderEventsPagination(page, pages, total) {
     const el = document.getElementById('events-pagination');
     if (!el) return;
 
-    const btn = (label, p, active = false, disabled = false) =>
-        `<button class="page-btn${active ? ' active' : ''}" ${disabled ? 'disabled' : ''}
-            onclick="${disabled || active ? '' : `loadEvents(${p})`}">${label}</button>`;
-
-    let html = btn('‹', page - 1, false, page === 1);
-    if (pages <= 1) {
-        html += btn(1, 1, true);
-    } else {
-        const delta = 2;
-        const visiblePages = new Set([1, pages]);
-        for (let p = Math.max(1, page - delta); p <= Math.min(pages, page + delta); p++) {
-            visiblePages.add(p);
-        }
-        let prev = -1;
-        for (const p of [...visiblePages].sort((a, b) => a - b)) {
-            if (prev !== -1 && p - prev > 1) html += `<span class="page-info">…</span>`;
-            html += btn(p, p, p === page);
-            prev = p;
-        }
-    }
-    html += btn('›', page + 1, false, page === pages);
-    html += `<span class="page-info">총 ${total}건</span>`;
+    let html = paginationMarkup(page, pages, total, 'loadEvents');
     html += `
         <form class="page-jump" onsubmit="jumpToEventsPage(event)">
             <label for="events-page-input">페이지</label>

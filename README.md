@@ -304,20 +304,39 @@ Watering detection has its own `WATERING_*` variables, listed at the top of
 ## Tests
 
 ```sh
-python -m unittest discover -s tests
+python -B -m unittest discover -s tests
+node --test tests/test_dashboard_js.cjs
 ```
 
 Test modules pin the service `DB_FILE` globals to temporary databases, so runs
 never touch `app/data/`.
 
+The Python suite covers sensor ingestion, alert/recovery and offline detection,
+crop thresholds, cultivation records, authentication, retention, and history/CSV
+filter parity (including exports over 200,000 rows). JavaScript tests execute the
+dashboard with a DOM/Chart harness and check rendering, pagination, filters,
+request cancellation and stale period responses. They are not a substitute for
+browser layout checks or real sensor/Discord delivery tests.
+
+CI runs both suites and compiles both ESP32 projects with placeholder secrets.
+For a local compile without private credentials, `tests/fixtures/firmware/secrets.h`
+provides compile-only values. In PowerShell:
+
+```powershell
+$env:PLATFORMIO_BUILD_FLAGS = '-I../tests/fixtures/firmware'
+pio run -d esp32-real-sensor-node
+pio run -d esp32-dummy-node
+Remove-Item Env:PLATFORMIO_BUILD_FLAGS
+```
+
+Do not upload placeholder builds to a device. Hardware checks require actual
+credentials and must verify live readings, threshold/recovery notifications,
+offline/reconnection behavior, and scheduled Discord delivery on the Pi.
+
 ## Deployment
 
-`app.run()` starts Werkzeug's development server, which is not built for
-sustained traffic. On this Windows machine it stops answering after roughly
-25–30 rapid requests — the handler still runs and logs, but the response never
-reaches the client. This reproduces on an unmodified checkout, with both
-`threaded=True` and `threaded=False`, and with `curl` as well as Python clients,
-so it is a property of the dev server rather than of any one feature.
+`app.run()` starts Werkzeug's development server. Use it for local development,
+not the Raspberry Pi production service.
 
 Run it behind a real WSGI server instead:
 

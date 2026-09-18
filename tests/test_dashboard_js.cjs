@@ -113,6 +113,46 @@ test('event pagination remains bounded for a million pages', () => {
     assert.match(html, /max="1000000"/);
 });
 
+test('shared pagination preserves legacy buttons and ellipses on every boundary', () => {
+    const { context, element } = dashboard();
+    function legacy(page, pages, total, handler) {
+        const btn = (label, p, active = false, disabled = false) =>
+            `<button class="page-btn${active ? ' active' : ''}" ${disabled ? 'disabled' : ''}
+            onclick="${disabled || active ? '' : `${handler}(${p})`}">${label}</button>`;
+        let html = btn('‹', page - 1, false, page === 1);
+        if (pages <= 1) html += btn(1, 1, true);
+        else {
+            let previous = -1;
+            for (let p = 1; p <= pages; p++) {
+                if (p === 1 || p === pages || Math.abs(p - page) <= 2) {
+                    if (previous !== -1 && p - previous > 1) html += '<span class="page-info">…</span>';
+                    html += btn(p, p, p === page);
+                    previous = p;
+                }
+            }
+        }
+        return html + btn('›', page + 1, false, page === pages) + `<span class="page-info">총 ${total}건</span>`;
+    }
+    for (let pages = 1; pages <= 50; pages++) {
+        for (let page = 1; page <= pages; page++) {
+            context.renderPagination(page, pages, pages * 10);
+            assert.equal(element('pagination').innerHTML, legacy(page, pages, pages * 10, 'loadHistory'));
+            context.renderEventsPagination(page, pages, pages * 10);
+            assert.ok(element('events-pagination').innerHTML.startsWith(legacy(page, pages, pages * 10, 'loadEvents')));
+            assert.match(element('events-pagination').innerHTML, /jumpToEventsPage\(event\)/);
+        }
+    }
+});
+
+test('history pagination handles a million pages without traversing all pages', () => {
+    const { context, element } = dashboard();
+    context.renderPagination(500000, 1000000, 10000000);
+    const html = element('pagination').innerHTML;
+    assert.ok(html.length < 4000);
+    assert.match(html, /loadHistory\(1000000\)/);
+    assert.equal((html.match(/<button /g) || []).length, 9);
+});
+
 test('page jump validates bounds before issuing a request', () => {
     const { run, context, element } = dashboard();
     run('eventsMeta.pages = 8');

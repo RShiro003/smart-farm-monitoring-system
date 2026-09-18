@@ -17,6 +17,15 @@ jobs:
       - run: python -m compileall -q app
       - run: python -m unittest discover -s tests -v
 
+  frontend-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: node --test tests/test_dashboard_js.cjs
+
   firmware-build:
     runs-on: ubuntu-latest
     strategy:

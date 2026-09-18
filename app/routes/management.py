@@ -12,7 +12,7 @@ from flask import Blueprint, Response, jsonify, make_response, request
 from .query_filters import event_filters
 
 try:
-    from services.validation import finite_number
+    from services.validation import finite_number, required_device_id as _required_device_id
     from services import device_service, export_service, retention_service, work_log_service
     from services.discord_alert_service import discord_webhook_url_is_allowed
     from services.alert_service import (
@@ -34,7 +34,7 @@ try:
     )
     from services.sensor_service import list_device_ids_from_db, normalize_device_filter
 except ModuleNotFoundError:
-    from app.services.validation import finite_number
+    from app.services.validation import finite_number, required_device_id as _required_device_id
     from app.services import device_service, export_service, retention_service, work_log_service
     from app.services.discord_alert_service import discord_webhook_url_is_allowed
     from app.services.alert_service import (
@@ -81,13 +81,6 @@ def _login_rate_limited(client):
 def _record_login_failure(client):
     with _login_lock:
         _login_attempts.setdefault(client, []).append(time.monotonic())
-
-
-def _required_device_id(value):
-    if not isinstance(value, str):
-        return None
-    value = value.strip()
-    return value or None
 
 
 # ── 장치 관리 ──────────────────────────────────────────────────────────────────
