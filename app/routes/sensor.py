@@ -183,7 +183,7 @@ def get_sensor_data():
 
 @sensor_bp.route("/api/sensor", methods=["POST"])
 def receive_sensor_data():
-    # ESP32가 5초 주기로 JSON을 POST하는 수집 지점이다.
+    # ESP32가 30초 주기로 JSON을 POST하는 수집 지점이다.
     # request.get_json(silent=True)를 사용해 JSON이 아니거나 파싱 실패한 요청도 서버 예외 대신 400으로 처리한다.
     new_data = request.get_json(silent=True)
 

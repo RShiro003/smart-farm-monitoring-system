@@ -15,7 +15,11 @@
 // Copy include/secrets.example.h to include/secrets.h and fill in local values before flashing.
 // 여러 ESP32가 한 Raspberry Pi 서버로 데이터를 보내므로 보드마다 고유한 DEVICE_ID가 필요하다.
 // 서버 DB의 device_id 컬럼, 대시보드 장치 필터, 임계값 설정 조회가 모두 이 값으로 연결된다.
+// 센서 측정 및 서버 전송 주기다. 서버의 오프라인 판정(DEVICE_OFFLINE_SECONDS),
+// 관수 감지(WATERING_*), 요약 보고서 수집률 계산이 모두 30초 주기를 기준으로 맞춰져 있다.
+const unsigned long SENSOR_SEND_INTERVAL_MS = 30000;
 // 임계값은 사용자가 대시보드에서 바꿀 수 있으므로 주기적으로 서버에서 다시 가져온다.
+// 확인은 loop 시작 시에만 하므로 실제로는 전송 2주기(약 60초)마다 조회된다.
 const unsigned long THRESHOLD_FETCH_INTERVAL_MS = 45000;
 // 네트워크가 불안정할 때 loop가 오래 멈추지 않도록 HTTP/Wi-Fi 대기 시간을 제한한다.
 const unsigned long HTTP_TIMEOUT_MS = 3000;
@@ -367,6 +371,15 @@ void updateStatusLED(FarmStatus status) {
   }
 }
 
+void waitForNextSample(unsigned long loopStartedAt) {
+  // 고정 delay를 쓰면 Wi-Fi 재연결·HTTP 대기 시간만큼 주기가 늘어난다.
+  // 이번 loop가 이미 쓴 시간을 빼고 남은 만큼만 기다려 전송 간격을 30초로 유지한다.
+  unsigned long elapsed = millis() - loopStartedAt;
+  if (elapsed < SENSOR_SEND_INTERVAL_MS) {
+    delay(SENSOR_SEND_INTERVAL_MS - elapsed);
+  }
+}
+
 void setup() {
   // 부팅 직후 Serial과 센서/핀을 초기화한다.
   // LED는 먼저 모두 꺼서 이전 전원 상태가 남아 보이지 않게 한다.
@@ -403,6 +416,7 @@ void loop() {
   // 3) 센서값 측정
   // 4) 임계값으로 LED 상태 판단
   // 5) JSON 생성 후 Flask /api/sensor로 POST
+  unsigned long loopStartedAt = millis();
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("WiFi disconnected. Reconnecting...");
     connectWiFi();
@@ -519,7 +533,7 @@ void loop() {
     if (WiFi.status() != WL_CONNECTED) {
       enqueueSensorPayload(jsonData);
       Serial.println("WiFi disconnected. Sensor sample queued.");
-      delay(5000);
+      waitForNextSample(loopStartedAt);
       return;
     }
 
@@ -549,5 +563,5 @@ void loop() {
     http.end();
   }
 
-  delay(5000);
+  waitForNextSample(loopStartedAt);
 }

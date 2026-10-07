@@ -22,6 +22,8 @@ const int daylightOffset_sec = 0;
 // 다음 이상상태 발생 시점을 2~5분 사이에서 랜덤하게 잡는다.
 const unsigned long ANOMALY_MIN_INTERVAL_MS = 120000;
 const unsigned long ANOMALY_MAX_INTERVAL_MS = 300000;
+// 실제 센서 노드와 같은 30초 전송 주기다.
+const unsigned long SENSOR_SEND_INTERVAL_MS = 30000;
 
 // 현재 더미 센서값은 loop마다 목표값을 향해 조금씩 이동한다.
 // 완전 랜덤값을 매번 보내면 그래프가 튀기 때문에, 실제 센서처럼 완만한 추세를 만들기 위한 상태값이다.
@@ -362,7 +364,7 @@ void loop() {
   // 2) 현재 timestamp 생성
   // 3) JSON payload 조립
   // 4) Flask 서버의 /api/sensor로 POST
-  // 이 순서를 5초마다 반복해 실제 센서 노드와 같은 서버 저장 흐름을 검증한다.
+  // 이 순서를 30초마다 반복해 실제 센서 노드와 같은 서버 저장 흐름을 검증한다.
   generateDummySensorData();
 
   float temperature = currentTemperature;
@@ -444,5 +446,5 @@ void loop() {
     Serial.println("WiFi disconnected");
   }
 
-  delay(5000);
+  delay(SENSOR_SEND_INTERVAL_MS);
 }

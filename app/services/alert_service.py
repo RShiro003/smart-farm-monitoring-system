@@ -1,6 +1,8 @@
+import json
 import os
 import sqlite3
 import threading
+import unicodedata
 from datetime import datetime, timedelta
 
 from .database import connect_database
@@ -9,11 +11,15 @@ from .validation import finite_number, positive_int as _normalize_positive_int
 
 try:
     from services.discord_alert_service import send_discord_message
-    from services.sensor_service import LIGHT_UNIT_LUX, list_device_status, offline_after_seconds
+    from services.sensor_service import (
+        DEFAULT_SENSOR_INTERVAL_SECONDS, LIGHT_UNIT_LUX, list_device_status, offline_after_seconds,
+    )
     from services.threshold_service import DEFAULT_THRESHOLDS, get_or_create_thresholds
 except ModuleNotFoundError:
     from app.services.discord_alert_service import send_discord_message
-    from app.services.sensor_service import LIGHT_UNIT_LUX, list_device_status, offline_after_seconds
+    from app.services.sensor_service import (
+        DEFAULT_SENSOR_INTERVAL_SECONDS, LIGHT_UNIT_LUX, list_device_status, offline_after_seconds,
+    )
     from app.services.threshold_service import DEFAULT_THRESHOLDS, get_or_create_thresholds
 
 
@@ -167,6 +173,7 @@ def _ensure_tables(conn):
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             device_id       TEXT NOT NULL,
             message         TEXT NOT NULL,
+            payload         TEXT,
             status          TEXT NOT NULL DEFAULT 'pending',
             attempts        INTEGER NOT NULL DEFAULT 0,
             next_attempt_at TEXT NOT NULL,
@@ -224,6 +231,11 @@ def _ensure_tables(conn):
         },
         "event_log": {
             "severity": "TEXT NOT NULL DEFAULT 'warning'",
+        },
+        # 요약 보고서처럼 Discord 임베드로 보낼 알림의 JSON 본문이다.
+        # NULL이면 message를 일반 텍스트로 보낸다.
+        "notification_outbox": {
+            "payload": "TEXT",
         },
     }
     for table, columns in migrations.items():
@@ -725,16 +737,32 @@ def _record_recovery_events(
         messages.append(message)
 
 
-def _enqueue_notification(conn, device_id, message, created_at=None):
+def _enqueue_notification(conn, device_id, message, created_at=None, payload=None):
     created_at = created_at or _now_string()
     conn.execute(
         """
         INSERT INTO notification_outbox (
-            device_id, message, status, attempts, next_attempt_at, created_at
-        ) VALUES (?, ?, 'pending', 0, ?, ?)
+            device_id, message, payload, status, attempts, next_attempt_at, created_at
+        ) VALUES (?, ?, ?, 'pending', 0, ?, ?)
         """,
-        (device_id, message, created_at, created_at),
+        (
+            device_id,
+            message,
+            json.dumps(payload, ensure_ascii=False) if payload else None,
+            created_at,
+            created_at,
+        ),
     )
+
+
+def _load_payload(raw):
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def deliver_pending_notifications(limit=20):
@@ -791,7 +819,9 @@ def deliver_pending_notifications(limit=20):
 
         settings = get_alert_settings(job["device_id"])
         ok = send_discord_message(
-            job["message"], webhook_url=settings.get("webhook_url")
+            job["message"],
+            webhook_url=settings.get("webhook_url"),
+            payload=_load_payload(job.get("payload")),
         )
         conn = _connect()
         try:
@@ -1349,36 +1379,89 @@ def _scheduled_period(now, summary_type, settings):
     return scheduled, end - timedelta(days=7), end
 
 
-def build_summary_message(device_id, summary_type, start, end):
+# 일간/주간 보고서를 Discord에서 한눈에 구분하기 위한 스타일이다.
+# 제목 크기(# > ##), 임베드 색, 배지 문구를 다르게 두고,
+# 지표 필드는 같은 순서·같은 형식으로 배치해 두 보고서를 나란히 비교하기 쉽게 한다.
+SUMMARY_STYLES = {
+    "daily": {
+        "label": "일간",
+        "heading": "##",
+        "icon": "📅",
+        "badge": "🟦 DAILY REPORT · 일간 요약",
+        "color": 0x3498DB,  # 하늘색
+        "compare_label": "전일",
+    },
+    "weekly": {
+        "label": "주간",
+        "heading": "#",
+        "icon": "📊",
+        "badge": "🟪 WEEKLY REPORT · 주간 요약",
+        "color": 0x9B59B6,  # 보라색
+        "compare_label": "전주",
+    },
+}
+
+SUMMARY_METRICS = (
+    # (표시 이름, 집계 접두어, 단위, 증감 단위)
+    ("🌡️ 온도", "temperature", "°C", "°C"),
+    ("💧 습도", "humidity", "%", "%p"),
+    ("🪴 토양 수분", "soil", "%", "%p"),
+    ("☀️ 조도", "light", " lux", " lux"),
+)
+
+_WEEKDAY_LABELS = "월화수목금토일"
+_SUMMARY_AGGREGATE_SQL = """
+    SELECT COUNT(*) AS samples,
+           AVG(temperature) AS temperature_avg,
+           MIN(temperature) AS temperature_min,
+           MAX(temperature) AS temperature_max,
+           AVG(humidity) AS humidity_avg,
+           MIN(humidity) AS humidity_min,
+           MAX(humidity) AS humidity_max,
+           AVG(soil_moisture) AS soil_avg,
+           MIN(soil_moisture) AS soil_min,
+           MAX(soil_moisture) AS soil_max,
+           AVG(CASE WHEN light_unit = 'lux' THEN light END) AS light_avg,
+           MIN(CASE WHEN light_unit = 'lux' THEN light END) AS light_min,
+           MAX(CASE WHEN light_unit = 'lux' THEN light END) AS light_max,
+           SUM(CASE WHEN sensor_errors IS NOT NULL
+                          AND sensor_errors NOT IN ('', '[]')
+                    THEN 1 ELSE 0 END) AS error_samples
+    FROM sensor_data
+    WHERE device_id = ? AND server_received_at >= ? AND server_received_at < ?
+"""
+
+
+def _db_time(value):
+    return value.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _weekday_label(value):
+    return _WEEKDAY_LABELS[value.weekday()]
+
+
+def _display_width(text):
+    # 코드 블록 표에서 한글(전각)은 두 칸을 차지하므로 폭 계산에 반영한다.
+    return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in text)
+
+
+def _pad(text, width, align="right"):
+    gap = " " * max(0, width - _display_width(text))
+    return gap + text if align == "right" else text + gap
+
+
+def _collect_summary_data(device_id, summary_type, start, end):
+    """요약 보고서에 필요한 집계를 한 번의 연결로 모은다."""
+    previous_start = start - (end - start)
     conn = _connect()
     try:
         _ensure_tables(conn)
         row = conn.execute(
-            """
-            SELECT COUNT(*) AS samples,
-                   AVG(temperature) AS temperature_avg,
-                   MIN(temperature) AS temperature_min,
-                   MAX(temperature) AS temperature_max,
-                   AVG(humidity) AS humidity_avg,
-                   MIN(humidity) AS humidity_min,
-                   MAX(humidity) AS humidity_max,
-                   AVG(soil_moisture) AS soil_avg,
-                   MIN(soil_moisture) AS soil_min,
-                   MAX(soil_moisture) AS soil_max,
-                   AVG(CASE WHEN light_unit = 'lux' THEN light END) AS light_avg,
-                   MIN(CASE WHEN light_unit = 'lux' THEN light END) AS light_min,
-                   MAX(CASE WHEN light_unit = 'lux' THEN light END) AS light_max,
-                   SUM(CASE WHEN sensor_errors IS NOT NULL
-                                  AND sensor_errors NOT IN ('', '[]')
-                            THEN 1 ELSE 0 END) AS error_samples
-            FROM sensor_data
-            WHERE device_id = ? AND server_received_at >= ? AND server_received_at < ?
-            """,
-            (
-                device_id,
-                start.strftime("%Y-%m-%d %H:%M:%S"),
-                end.strftime("%Y-%m-%d %H:%M:%S"),
-            ),
+            _SUMMARY_AGGREGATE_SQL, (device_id, _db_time(start), _db_time(end))
+        ).fetchone()
+        previous = conn.execute(
+            _SUMMARY_AGGREGATE_SQL,
+            (device_id, _db_time(previous_start), _db_time(start)),
         ).fetchone()
         events = conn.execute(
             """
@@ -1387,14 +1470,69 @@ def build_summary_message(device_id, summary_type, start, end):
             WHERE device_id = ? AND created_at >= ? AND created_at < ?
             GROUP BY status, severity, event_type
             """,
-            (
-                device_id,
-                start.strftime("%Y-%m-%d %H:%M:%S"),
-                end.strftime("%Y-%m-%d %H:%M:%S"),
-            ),
+            (device_id, _db_time(start), _db_time(end)),
         ).fetchall()
+        daily_rows = []
+        daily_alerts = {}
+        if summary_type == "weekly":
+            daily_rows = conn.execute(
+                """
+                SELECT substr(server_received_at, 1, 10) AS day,
+                       COUNT(*) AS samples,
+                       AVG(temperature) AS temperature_avg,
+                       AVG(humidity) AS humidity_avg,
+                       AVG(soil_moisture) AS soil_avg
+                FROM sensor_data
+                WHERE device_id = ? AND server_received_at >= ? AND server_received_at < ?
+                GROUP BY day
+                """,
+                (device_id, _db_time(start), _db_time(end)),
+            ).fetchall()
+            daily_alerts = {
+                item["day"]: int(item["count"])
+                for item in conn.execute(
+                    """
+                    SELECT substr(created_at, 1, 10) AS day, COUNT(*) AS count
+                    FROM event_log
+                    WHERE device_id = ? AND status = 'abnormal'
+                      AND created_at >= ? AND created_at < ?
+                    GROUP BY day
+                    """,
+                    (device_id, _db_time(start), _db_time(end)),
+                ).fetchall()
+            }
     finally:
         conn.close()
+
+    def count(predicate):
+        return sum(int(item["count"]) for item in events if predicate(item))
+
+    samples = int(row["samples"] or 0)
+    expected = max(1, int((end - start).total_seconds() // DEFAULT_SENSOR_INTERVAL_SECONDS))
+    return {
+        "row": row,
+        "previous": previous,
+        "samples": samples,
+        "error_samples": int(row["error_samples"] or 0),
+        "expected_samples": expected,
+        "coverage": min(1.0, samples / expected),
+        "abnormal": count(lambda item: item["status"] == "abnormal"),
+        "recovered": count(lambda item: item["status"] == "recovered"),
+        "danger": count(
+            lambda item: item["status"] == "abnormal" and item["severity"] == "danger"
+        ),
+        "offline": count(
+            lambda item: item["status"] == "abnormal"
+            and item["event_type"] == "device_offline"
+        ),
+        "daily_rows": {item["day"]: item for item in daily_rows},
+        "daily_alerts": daily_alerts,
+    }
+
+
+def _summary_text(device_id, summary_type, start, end, data):
+    """임베드를 보낼 수 없을 때 쓰는 일반 텍스트 요약이다."""
+    row = data["row"]
 
     def metric_line(label, prefix, unit):
         avg = row[f"{prefix}_avg"]
@@ -1407,30 +1545,189 @@ def build_summary_message(device_id, summary_type, start, end):
             f"(최저 {_format_number(low)} / 최고 {_format_number(high)}{unit})"
         )
 
-    abnormal = sum(int(item["count"]) for item in events if item["status"] == "abnormal")
-    recovered = sum(int(item["count"]) for item in events if item["status"] == "recovered")
-    danger = sum(
-        int(item["count"])
-        for item in events
-        if item["status"] == "abnormal" and item["severity"] == "danger"
-    )
-    offline = sum(
-        int(item["count"])
-        for item in events
-        if item["status"] == "abnormal" and item["event_type"] == "device_offline"
-    )
-    title = "일간" if summary_type == "daily" else "주간"
+    title = SUMMARY_STYLES[summary_type]["label"]
     return "\n".join([
         f"[스마트팜 {title} 요약]",
         f"장치: {device_id}",
         f"기간: {start:%Y-%m-%d} ~ {(end - timedelta(seconds=1)):%Y-%m-%d %H:%M}",
-        f"수집: {int(row['samples'] or 0):,}건 · 센서 오류 포함 {int(row['error_samples'] or 0):,}건",
+        f"수집: {data['samples']:,}건(수집률 {data['coverage'] * 100:.0f}%) "
+        f"· 센서 오류 포함 {data['error_samples']:,}건",
         metric_line("온도", "temperature", "°C"),
         metric_line("습도", "humidity", "%"),
         metric_line("토양 수분", "soil", "%"),
         metric_line("조도", "light", " lux"),
-        f"알림: 이상 {abnormal}건(위험 {danger}건) · 복구 {recovered}건 · 오프라인 {offline}건",
+        f"알림: 이상 {data['abnormal']}건(위험 {data['danger']}건) "
+        f"· 복구 {data['recovered']}건 · 오프라인 {data['offline']}건",
     ])
+
+
+def _device_display_name(device_id):
+    try:
+        try:
+            from services.device_service import display_name, get_device
+        except ModuleNotFoundError:
+            from app.services.device_service import display_name, get_device
+        device = get_device(device_id) or {}
+        return display_name(device_id, device.get("label"))
+    except Exception:
+        # 설정 DB 문제로 별칭을 못 읽어도 보고서는 식별자로 보낸다.
+        return device_id
+
+
+def _summary_status(data):
+    if data["samples"] == 0:
+        return "⚫", "수집된 데이터 없음"
+    if data["danger"]:
+        return "🔴", f"위험 {data['danger']}건 포함 이상 알림 {data['abnormal']}건"
+    if data["abnormal"]:
+        return "🟡", f"이상 알림 {data['abnormal']}건 (모두 경고 수준)"
+    if data["coverage"] < 0.9:
+        return "🟡", f"이상 없음 · 수집률 낮음 ({data['coverage'] * 100:.0f}%)"
+    return "🟢", "이상 없음"
+
+
+def _delta_text(current, previous, unit, compare_label):
+    if current is None:
+        return ""
+    if previous is None:
+        return f"{compare_label} 데이터 없음"
+    delta = float(current) - float(previous)
+    if abs(delta) < 0.05:
+        return f"{compare_label} 대비 ― 변화 없음"
+    arrow = "▲" if delta > 0 else "▼"
+    return f"{compare_label} 대비 {arrow} {abs(delta):.1f}{unit}"
+
+
+def _metric_field(label, prefix, unit, delta_unit, data, compare_label):
+    row = data["row"]
+    avg = row[f"{prefix}_avg"]
+    if avg is None:
+        value = "데이터 없음"
+    else:
+        lines = [
+            f"**{avg:.1f}{unit}**",
+            f"범위 {row[f'{prefix}_min']:.1f} ~ {row[f'{prefix}_max']:.1f}",
+            _delta_text(avg, data["previous"][f"{prefix}_avg"], delta_unit, compare_label),
+        ]
+        value = "\n".join(line for line in lines if line)
+    return {"name": label, "value": value, "inline": True}
+
+
+def _weekly_trend_field(start, data):
+    """주간 보고서 전용: 하루 단위 평균을 코드 블록 표로 보여준다."""
+    widths = (9, 6, 6, 6, 6)
+    header = ("날짜", "온도", "습도", "토양", "알림")
+    lines = ["".join(
+        _pad(text, width, "left" if index == 0 else "right")
+        for index, (text, width) in enumerate(zip(header, widths))
+    )]
+    for offset in range(7):
+        day = start + timedelta(days=offset)
+        key = day.strftime("%Y-%m-%d")
+        item = data["daily_rows"].get(key)
+
+        def cell(prefix):
+            value = item[f"{prefix}_avg"] if item is not None else None
+            return "—" if value is None else f"{value:.1f}"
+
+        values = (
+            f"{day:%m/%d}({_weekday_label(day)})",
+            cell("temperature"),
+            cell("humidity"),
+            cell("soil"),
+            str(data["daily_alerts"].get(key, 0)),
+        )
+        lines.append("".join(
+            _pad(text, width, "left" if index == 0 else "right")
+            for index, (text, width) in enumerate(zip(values, widths))
+        ))
+    return {
+        "name": "📈 일별 평균 추이 (온도 °C · 습도 % · 토양 %)",
+        "value": "```\n" + "\n".join(lines) + "\n```",
+        "inline": False,
+    }
+
+
+def _summary_payload(device_id, summary_type, start, end, settings, data):
+    """일간/주간 요약을 Discord 임베드 본문으로 만든다."""
+    style = SUMMARY_STYLES[summary_type]
+    last_day = end - timedelta(seconds=1)
+    if summary_type == "daily":
+        period = f"{start:%Y-%m-%d} ({_weekday_label(start)})"
+        schedule = f"매일 {int(settings['summary_hour']):02d}시 발송"
+    else:
+        period = (
+            f"{start:%Y-%m-%d} ({_weekday_label(start)}) ~ "
+            f"{last_day:%m-%d} ({_weekday_label(last_day)})"
+        )
+        weekday = _WEEKDAY_LABELS[int(settings["summary_weekday"])]
+        schedule = f"매주 {weekday}요일 {int(settings['summary_hour']):02d}시 발송"
+
+    name = _device_display_name(device_id)
+    status_icon, status_text = _summary_status(data)
+    coverage_mark = "" if data["coverage"] >= 0.9 else " ⚠️"
+    fields = [
+        _metric_field(label, prefix, unit, delta_unit, data, style["compare_label"])
+        for label, prefix, unit, delta_unit in SUMMARY_METRICS
+    ]
+    fields.append({
+        "name": "📦 수집",
+        "value": (
+            f"**{data['samples']:,}건**\n"
+            f"수집률 {data['coverage'] * 100:.0f}%{coverage_mark}\n"
+            f"센서 오류 {data['error_samples']:,}건"
+        ),
+        "inline": True,
+    })
+    fields.append({
+        "name": "🚨 알림",
+        "value": (
+            f"이상 **{data['abnormal']}**건 (위험 {data['danger']})\n"
+            f"복구 {data['recovered']}건\n"
+            f"장치 무응답 {data['offline']}건"
+        ),
+        "inline": True,
+    })
+    if summary_type == "weekly":
+        fields.append(_weekly_trend_field(start, data))
+
+    return {
+        "content": (
+            f"{style['heading']} {style['icon']} {style['label']} 리포트\n"
+            f"-# {name} · {period}"
+        ),
+        "embeds": [{
+            "author": {"name": style["badge"]},
+            "title": f"{name} — {period}",
+            "description": (
+                f"**상태** {status_icon} {status_text}\n"
+                f"**집계 구간** {start:%Y-%m-%d %H:%M} ~ {last_day:%Y-%m-%d %H:%M}"
+            ),
+            "color": style["color"],
+            "fields": fields,
+            "footer": {
+                "text": (
+                    f"스마트팜 모니터링 · {style['label']} 요약 · {schedule} "
+                    f"· 증감은 {style['compare_label']} 평균 대비"
+                )
+            },
+            "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
+        }],
+    }
+
+
+def build_summary_report(device_id, summary_type, start, end, settings=None):
+    """(일반 텍스트, Discord 임베드 payload) 쌍을 만든다."""
+    settings = settings or ALERT_RULE_DEFAULTS
+    data = _collect_summary_data(device_id, summary_type, start, end)
+    return (
+        _summary_text(device_id, summary_type, start, end, data),
+        _summary_payload(device_id, summary_type, start, end, settings, data),
+    )
+
+
+def build_summary_message(device_id, summary_type, start, end):
+    return build_summary_report(device_id, summary_type, start, end)[0]
 
 
 def queue_due_summaries(now=None):
@@ -1483,7 +1780,9 @@ def queue_due_summaries(now=None):
                 ).fetchone()
                 if exists is not None:
                     continue
-                message = build_summary_message(device_id, summary_type, start, end)
+                message, payload = build_summary_report(
+                    device_id, summary_type, start, end, settings
+                )
                 inserted = conn.execute(
                     """
                     INSERT OR IGNORE INTO summary_delivery
@@ -1494,7 +1793,7 @@ def queue_due_summaries(now=None):
                 ).rowcount
                 if not inserted:
                     continue
-                _enqueue_notification(conn, device_id, message)
+                _enqueue_notification(conn, device_id, message, payload=payload)
                 queued += 1
                 # 발송 이력과 outbox를 함께 확정하고 다음 요약 조회 전에 쓰기 잠금을 푼다.
                 conn.commit()

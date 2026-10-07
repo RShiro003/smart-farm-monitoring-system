@@ -6,6 +6,7 @@
 import gc
 import csv
 import io
+import json
 import os
 import sqlite3
 import sys
@@ -975,6 +976,71 @@ class AlertConfirmationSummaryAndWorkLogTests(_BaseCase):
             conn.close()
         self.assertIn("스마트팜 일간 요약", message)
         self.assertIn("평균 24", message)
+
+    def test_daily_and_weekly_summaries_use_distinct_embed_styles(self):
+        for day in range(7):
+            self._insert_row_at(
+                "esp32_01", datetime(2026, 9, 7 + day, 12),
+                temperature=20 + day, humidity=60, soil_moisture=50,
+                light=3500, light_unit="lux",
+            )
+        self._insert_row_at(
+            "esp32_01", datetime(2026, 8, 31, 12),
+            temperature=18, humidity=60, soil_moisture=50,
+            light=3500, light_unit="lux",
+        )
+        alert_service.save_alert_settings("esp32_01", {
+            "daily_summary": True, "weekly_summary": True,
+            "summary_hour": 8, "summary_weekday": 0,
+        })
+        self.assertEqual(
+            alert_service.queue_due_summaries(datetime(2026, 9, 14, 9)), 2
+        )
+        conn = sqlite3.connect(_SENSOR_DB)
+        try:
+            payloads = [
+                json.loads(row[0]) for row in conn.execute(
+                    "SELECT payload FROM notification_outbox ORDER BY id"
+                ).fetchall()
+            ]
+        finally:
+            conn.close()
+        daily, weekly = sorted(
+            payloads, key=lambda item: "주간" in item["content"]
+        )
+        self.assertTrue(daily["content"].startswith("## "))
+        self.assertTrue(weekly["content"].startswith("# "))
+        daily_embed, weekly_embed = daily["embeds"][0], weekly["embeds"][0]
+        self.assertNotEqual(daily_embed["color"], weekly_embed["color"])
+        self.assertIn("DAILY", daily_embed["author"]["name"])
+        self.assertIn("WEEKLY", weekly_embed["author"]["name"])
+        # 두 보고서는 같은 지표 필드를 같은 순서로 가진다.
+        daily_names = [field["name"] for field in daily_embed["fields"]]
+        weekly_names = [field["name"] for field in weekly_embed["fields"]]
+        self.assertEqual(weekly_names[:len(daily_names)], daily_names)
+        self.assertIn("일별 평균 추이", weekly_names[-1])
+        self.assertIn("09/13(일)", weekly_embed["fields"][-1]["value"])
+        temperature = weekly_embed["fields"][0]["value"]
+        self.assertIn("**23.0°C**", temperature)
+        self.assertIn("전주 대비 ▲ 5.0°C", temperature)
+        self.assertIn("전일 대비 ▲ 1.0°C", daily_embed["fields"][0]["value"])
+
+    def test_rich_payload_is_delivered_with_plain_text_fallback(self):
+        from app.services import discord_alert_service as discord
+
+        calls = []
+
+        def fake_post(url, body):
+            calls.append(body)
+            return ("embeds" not in body, 400 if "embeds" in body else 204)
+
+        with mock.patch.object(discord, "_post_webhook", side_effect=fake_post):
+            ok = discord.send_discord_message(
+                "plain", "https://discord.com/api/webhooks/1/x",
+                payload={"content": "# 주간", "embeds": [{"title": "t"}]},
+            )
+        self.assertTrue(ok)
+        self.assertEqual(calls[-1], {"content": "plain"})
 
     def test_work_log_crud_api(self):
         created = self.client.post("/api/work-logs", json={
