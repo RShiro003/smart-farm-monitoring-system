@@ -188,7 +188,7 @@ times as purple vertical annotations on all sensor charts.
 filters as the dashboard tables (`device_id`, `date`, `time_from`, `time_to`,
 plus `date_from`/`date_to` and `status`/`metric` for events), so a download matches
 what you were looking at. Rows are streamed one at a time rather than collected in memory, because a
-wide date range at 5-second sampling is hundreds of thousands of rows. Output
+wide date range across several 30-second nodes is hundreds of thousands of rows. Output
 carries a UTF-8 BOM so Excel does not mangle the Korean headers, and each file
 includes the device label next to the id. All matching stored rows are exported;
 there is no silent 200,000-row cutoff. Large exports can take time, so use date
@@ -205,7 +205,7 @@ by CSV export; hourly rollups are not substituted for raw measurements.
 
 ## Retention and Downsampling
 
-One node at 5-second sampling writes ~17,000 rows/day, ~6.3M/year, and nothing
+One node at 30-second sampling writes ~2,880 rows/day, ~1.05M/year, and nothing
 used to delete or summarise them.
 
 `POST /api/maintenance/rollup` aggregates completed hours into
@@ -249,7 +249,7 @@ trusted isolated LAN or terminate HTTPS in a reverse proxy for untrusted links.
 |---|---|---|
 | `DISCORD_WEBHOOK_URL` | unset | Discord webhook. Alerts are skipped when unset. |
 | `ALERT_COOLDOWN_MINUTES` | `10` | Minimum gap before repeating an alert that is still active. |
-| `DEVICE_OFFLINE_SECONDS` | `120` | Silence after which a device counts as offline. |
+| `DEVICE_OFFLINE_SECONDS` | `180` | Silence after which a device counts as offline (~6 missed 30-second samples). |
 | `DEVICE_OFFLINE_CHECK_SECONDS` | `30` | Watchdog polling interval. |
 | `SMART_FARM_SENSOR_DB_FILE` | `app/data/sensor_data.db` | Sensor readings, `event_log`, `alert_state`, `alert_settings`, hourly rollups, growth and watering tables. |
 | `SMART_FARM_DB_FILE` | `app/data/smart_farm.db` | Thresholds, crop profiles and the device registry. |

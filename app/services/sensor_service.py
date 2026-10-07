@@ -37,9 +37,14 @@ LIGHT_UNIT_LUX = "lux"
 LIGHT_UNIT_DIGITAL = "digital"
 LIGHT_UNITS = (LIGHT_UNIT_LUX, LIGHT_UNIT_DIGITAL)
 
+# ESP32 센서 노드가 측정값을 보내는 기본 주기(초)다.
+# 요약 보고서의 수집률(실제 건수 / 기대 건수) 계산에 사용한다.
+DEFAULT_SENSOR_INTERVAL_SECONDS = 30
+
 # 마지막 수신 이후 이 시간이 지나면 장치를 오프라인으로 본다.
-# ESP32는 약 5초 주기로 전송하므로 기본 120초는 약 24회 연속 누락에 해당한다.
-DEFAULT_OFFLINE_SECONDS = 120
+# ESP32는 약 30초 주기로 전송하므로 기본 180초는 약 6회 연속 누락에 해당한다.
+# Wi-Fi 재연결(최대 15초)과 HTTP 타임아웃이 겹친 한두 주기 지연으로 오프라인 오탐이 나지 않게 한다.
+DEFAULT_OFFLINE_SECONDS = 180
 
 
 # ── Normalisation ──────────────────────────────────────────────────────────────
