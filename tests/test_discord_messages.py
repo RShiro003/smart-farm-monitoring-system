@@ -35,7 +35,7 @@ class DiscordMessageTests(unittest.TestCase):
                 self.assertEqual(request.full_url, self.URL)
                 self.assertEqual(request.get_method(), "POST")
                 self.assertEqual(self.urlopen.call_args.kwargs, {"timeout": 5})
-                self.assertEqual(json.loads(request.data), {"embeds": [{
+                self.assertEqual(json.loads(request.data), {"allowed_mentions": {"parse": []}, "embeds": [{
                     "title": title, "description": self.BODY, "color": color,
                 }]})
 
@@ -46,7 +46,7 @@ class DiscordMessageTests(unittest.TestCase):
             with self.subTest(message=message):
                 self.assertTrue(discord.send_discord_message(message, self.URL))
                 request = self.urlopen.call_args.args[0]
-                self.assertEqual(json.loads(request.data), {"content": message})
+                self.assertEqual(json.loads(request.data), {"content": message, "allowed_mentions": {"parse": []}})
 
     def test_incomplete_or_unknown_summary_preserves_text(self):
         for message in ("[스마트팜 일간 요약]", "[스마트팜 주간 요약]\n",
@@ -99,7 +99,7 @@ class DiscordMessageTests(unittest.TestCase):
         message = "가" * 2000
         self.assertTrue(discord.send_discord_message(message, self.URL))
         self.urlopen.assert_called_once()
-        self.assertEqual(json.loads(self.urlopen.call_args.args[0].data), {"content": message})
+        self.assertEqual(json.loads(self.urlopen.call_args.args[0].data), {"content": message, "allowed_mentions": {"parse": []}})
 
     def test_partial_direct_delivery_failure_returns_false_and_stops(self):
         response = mock.MagicMock()

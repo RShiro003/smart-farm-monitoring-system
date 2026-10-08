@@ -203,15 +203,17 @@ counts, and offline events. Failed summary delivery follows the same retry polic
 as immediate alerts.
 
 Discord summaries use color-coded embed cards: blue for daily (1 day), purple
-for weekly (7 days), with explicit titles and icons so color is not the only
-distinction. Summary values and periods are unchanged, as are ordinary alert
-messages. This formatting also applies to pending summaries when delivered;
-already-sent Discord messages are not edited. Deploy the updated server code
-and restart the Raspberry Pi service to apply it; the card styling needs no
-webhook changes or manual DB migration. Oversized summaries are split into cards (up to 4,096 UTF-16 units
-per description); plain-text messages are split at 2,000 units. Each part has
-its own durable outbox retry state, including oversized pending jobs from older
-versions. Successfully recorded parts are not resent when another part fails.
+for weekly (7 days), with explicit headings and DAILY/WEEKLY badges. Rich reports
+include period comparisons, collection coverage and a weekly daily-trend table.
+Their payload is stored with the notification type, so retries retain the report
+and use the summary webhook. If Discord rejects a rich payload with HTTP 400,
+delivery falls back to plain text. Mentions are disabled in all webhook messages.
+Legacy pending summaries without a stored payload still receive color-coded
+cards. Oversized legacy summaries are split at 4,096 UTF-16 units per description,
+and plain text at 2,000 units. Those outbox parts have independent retry state;
+successfully recorded parts are not resent when another part fails.
+Already-sent messages are not edited. Update and restart the Raspberry Pi service;
+no manual DB migration or webhook change is needed for the card styling.
 As with other webhook delivery, a network timeout after Discord has accepted a
 message can still cause a duplicate on retry.
 
@@ -228,8 +230,9 @@ times as purple vertical annotations on all sensor charts.
 `GET /api/export/sensor.csv` and `GET /api/export/events.csv` accept the same
 filters as the dashboard tables (`device_id`, `date`, `time_from`, `time_to`,
 plus `date_from`/`date_to` and `status`/`metric` for events), so a download matches
-what you were looking at. Rows are streamed one at a time rather than collected in memory, because a
-wide date ranges (including legacy 5-second data) can contain hundreds of thousands of rows. Output
+what you were looking at. Rows are streamed one at a time rather than collected
+in memory: wide date ranges across multiple nodes (including legacy 5-second
+data) can contain hundreds of thousands of rows. Output
 carries a UTF-8 BOM so Excel does not mangle the Korean headers, and each file
 includes the device label next to the id. All matching stored rows are exported;
 there is no silent 200,000-row cutoff. Large exports can take time, so use date
@@ -264,10 +267,11 @@ intervals are separate and unchanged; the server does not discard incoming rows
 to enforce the cadence. Flash the updated firmware onto each board: updating
 the Raspberry Pi alone does not change the sampling rate.
 
-The default offline timeout remains 120 seconds. Soil-moisture rise detection
-allows gaps up to 45 seconds for the new cadence plus network jitter. Update
+The default offline timeout is 180 seconds. Soil-moisture rise detection uses
+a 300-second window and allows gaps up to 90 seconds for missed samples and jitter. Update
 the Pi server too, and if `WATERING_MAX_SAMPLE_GAP_SECONDS` is explicitly set
-to the old value `15`, change it to `45` and restart the service. The historical
+to the old value `15`, change it to `90` and restart the service. Existing explicit
+`DEVICE_OFFLINE_SECONDS` values still override the 180-second default. The historical
 query buffer still accommodates 5-second data. Consecutive-sample alert rules
 now take longer to confirm; three readings span about 60 seconds instead of 10.
 
@@ -312,7 +316,7 @@ trusted isolated LAN or terminate HTTPS in a reverse proxy for untrusted links.
 |---|---|---|
 | `DISCORD_WEBHOOK_URL` | unset | Discord webhook. Alerts are skipped when unset. |
 | `ALERT_COOLDOWN_MINUTES` | `10` | Minimum gap before repeating an alert that is still active. |
-| `DEVICE_OFFLINE_SECONDS` | `120` | Silence after which a device counts as offline. |
+| `DEVICE_OFFLINE_SECONDS` | `180` | Silence after which a device counts as offline (~6 missed 30-second samples). |
 | `DEVICE_OFFLINE_CHECK_SECONDS` | `30` | Watchdog polling interval. |
 | `SMART_FARM_SENSOR_DB_FILE` | `app/data/sensor_data.db` | Sensor readings, `event_log`, `alert_state`, `alert_settings`, hourly rollups, growth and watering tables. |
 | `SMART_FARM_DB_FILE` | `app/data/smart_farm.db` | Thresholds, crop profiles and the device registry. |

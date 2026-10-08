@@ -188,11 +188,17 @@ class CultivationFeatureTests(unittest.TestCase):
         self.assertEqual(self._events("slow_sensor"), [])
 
     def test_gap_above_new_tolerance_breaks_watering_sequence(self):
-        start = datetime(2026, 8, 13, 8, 0, 0)
-        self._append_sequence("slow_sensor", [40, 41], start, spacing=30)
-        self._append_sequence("slow_sensor", [65, 66, 67],
-                              start + timedelta(seconds=76), spacing=30)
-        self.assertEqual(self._events("slow_sensor"), [])
+        # Cover both the earlier 45-second override and upstream's 90-second default.
+        for tolerance in (45, 90):
+            with self.subTest(tolerance=tolerance), mock.patch.object(
+                cultivation_service, "WATERING_MAX_SAMPLE_GAP_SECONDS", tolerance
+            ):
+                device_id = f"slow_sensor_{tolerance}"
+                start = datetime(2026, 8, 13, 8, 0, 0)
+                self._append_sequence(device_id, [40, 41], start, spacing=30)
+                self._append_sequence(device_id, [65, 66, 67],
+                                      start + timedelta(seconds=30 + tolerance + 1), spacing=30)
+                self.assertEqual(self._events(device_id), [])
 
     def test_gradual_change_is_ignored(self):
         self._append_sequence("esp32_01", [50, 51, 52, 53, 54])

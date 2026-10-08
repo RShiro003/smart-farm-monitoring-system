@@ -359,6 +359,56 @@ class SeparateWebhookTests(_BaseCase):
     ALERT_URL = "https://discord.com/api/webhooks/alert/token"
     SUMMARY_URL = "https://discord.com/api/webhooks/summary/token"
 
+    def test_upstream_payload_migration_preserves_report_and_retry_state(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        payload = json.dumps({"content": "# 주간", "embeds": [{"title": "existing report"}]})
+        try:
+            conn.execute("""CREATE TABLE notification_outbox (
+                id INTEGER PRIMARY KEY, device_id TEXT, message TEXT, payload TEXT,
+                status TEXT, attempts INTEGER, next_attempt_at TEXT, claimed_at TEXT,
+                sent_at TEXT, last_error TEXT, created_at TEXT)""")
+            conn.execute("INSERT INTO notification_outbox VALUES "
+                         "(1, 'esp32_01', ?, ?, 'pending', 2, '2000-01-01', NULL, NULL, NULL, '2000-01-01')",
+                         ("[스마트팜 주간 요약]\nreport", payload))
+            conn.commit()
+            alert_service._ensure_tables(conn)
+            alert_service._ensure_tables(conn)
+            row = conn.execute("SELECT notification_type, payload, status, attempts FROM notification_outbox").fetchone()
+            self.assertEqual(tuple(row), ("summary", payload, "pending", 2))
+        finally:
+            conn.close()
+
+    def test_rich_report_retry_preserves_payload_and_summary_destination(self):
+        alert_service.save_alert_settings("esp32_01", {
+            "webhook_url": self.ALERT_URL, "summary_webhook_url": self.SUMMARY_URL,
+        })
+        payload = {"content": "# 주간", "embeds": [{"title": "report", "color": 0x9B59B6}]}
+        # Even a long fallback text must not duplicate the same rich report.
+        message = "[스마트팜 주간 요약]\n" + "가" * 5000
+        conn = alert_service._connect()
+        try:
+            alert_service._enqueue_notification(conn, "esp32_01", message,
+                                                notification_type="summary", payload=payload)
+            conn.commit()
+        finally:
+            conn.close()
+        self.discord.side_effect = [False, True]
+        self.assertEqual(alert_service.deliver_pending_notifications(), 0)
+        conn = sqlite3.connect(_SENSOR_DB)
+        try:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM notification_outbox").fetchone()[0], 1)
+            conn.execute("UPDATE notification_outbox SET next_attempt_at = '2000-01-01 00:00:00'")
+            conn.commit()
+        finally:
+            conn.close()
+        self.assertEqual(alert_service.deliver_pending_notifications(), 1)
+        self.assertEqual(alert_service.deliver_pending_notifications(), 0)
+        self.assertEqual(self.discord.call_count, 2)
+        for call in self.discord.call_args_list:
+            self.assertEqual(call.args, (message,))
+            self.assertEqual(call.kwargs, {"webhook_url": self.SUMMARY_URL, "payload": payload})
+
     def test_concurrent_partial_saves_preserve_both_webhooks(self):
         for already_configured in (False, True):
             with self.subTest(already_configured=already_configured):
@@ -1355,21 +1405,21 @@ class AlertConfirmationSummaryAndWorkLogTests(_BaseCase):
         embeds = [json.loads(call.args[0].data)["embeds"][0] for call in send.call_args_list]
         self.assertEqual(len(embeds), 2)
         self.assertEqual([item["color"] for item in embeds], [0x3498DB, 0x9B59B6])
-        self.assertIn("일간 요약 · 1일", embeds[0]["title"])
-        self.assertIn("기간: 2026-09-15 ~ 2026-09-15 23:59", embeds[0]["description"])
-        self.assertIn("평균 24", embeds[0]["description"])
-        self.assertIn("주간 요약 · 7일", embeds[1]["title"])
-        self.assertIn("기간: 2026-09-07 ~ 2026-09-13 23:59", embeds[1]["description"])
-        self.assertIn("평균 20", embeds[1]["description"])
+        self.assertIn("DAILY", embeds[0]["author"]["name"])
+        self.assertIn("2026-09-15 00:00 ~ 2026-09-15 23:59", embeds[0]["description"])
+        self.assertIn("**24.0°C**", embeds[0]["fields"][0]["value"])
+        self.assertIn("WEEKLY", embeds[1]["author"]["name"])
+        self.assertIn("2026-09-07 00:00 ~ 2026-09-13 23:59", embeds[1]["description"])
+        self.assertIn("**20.0°C**", embeds[1]["fields"][0]["value"])
         conn = sqlite3.connect(_SENSOR_DB)
         try:
             rows = conn.execute(
-                "SELECT message, status, attempts FROM notification_outbox ORDER BY id"
+                "SELECT payload, status, attempts FROM notification_outbox ORDER BY id"
             ).fetchall()
         finally:
             conn.close()
         for row, embed in zip(rows, embeds):
-            self.assertEqual(row[0].split("\n", 1)[1], embed["description"])
+            self.assertEqual(json.loads(row[0])["embeds"][0], embed)
             self.assertEqual(row[1:], ("sent", 1))
 
     def test_split_summary_retries_only_failed_parts_including_legacy_jobs(self):
@@ -1426,6 +1476,70 @@ class AlertConfirmationSummaryAndWorkLogTests(_BaseCase):
                 self.assertEqual(self.discord.call_args.args[0], parts[1])
                 self.assertEqual(self.discord.call_args.kwargs["webhook_url"], summary_url)
                 self.discord.assert_called_once()
+    def test_daily_and_weekly_summaries_use_distinct_embed_styles(self):
+        for day in range(7):
+            self._insert_row_at(
+                "esp32_01", datetime(2026, 9, 7 + day, 12),
+                temperature=20 + day, humidity=60, soil_moisture=50,
+                light=3500, light_unit="lux",
+            )
+        self._insert_row_at(
+            "esp32_01", datetime(2026, 8, 31, 12),
+            temperature=18, humidity=60, soil_moisture=50,
+            light=3500, light_unit="lux",
+        )
+        alert_service.save_alert_settings("esp32_01", {
+            "daily_summary": True, "weekly_summary": True,
+            "summary_hour": 8, "summary_weekday": 0,
+        })
+        self.assertEqual(
+            alert_service.queue_due_summaries(datetime(2026, 9, 14, 9)), 2
+        )
+        conn = sqlite3.connect(_SENSOR_DB)
+        try:
+            payloads = [
+                json.loads(row[0]) for row in conn.execute(
+                    "SELECT payload FROM notification_outbox ORDER BY id"
+                ).fetchall()
+            ]
+        finally:
+            conn.close()
+        daily, weekly = sorted(
+            payloads, key=lambda item: "주간" in item["content"]
+        )
+        self.assertTrue(daily["content"].startswith("## "))
+        self.assertTrue(weekly["content"].startswith("# "))
+        daily_embed, weekly_embed = daily["embeds"][0], weekly["embeds"][0]
+        self.assertNotEqual(daily_embed["color"], weekly_embed["color"])
+        self.assertIn("DAILY", daily_embed["author"]["name"])
+        self.assertIn("WEEKLY", weekly_embed["author"]["name"])
+        # 두 보고서는 같은 지표 필드를 같은 순서로 가진다.
+        daily_names = [field["name"] for field in daily_embed["fields"]]
+        weekly_names = [field["name"] for field in weekly_embed["fields"]]
+        self.assertEqual(weekly_names[:len(daily_names)], daily_names)
+        self.assertIn("일별 평균 추이", weekly_names[-1])
+        self.assertIn("09/13(일)", weekly_embed["fields"][-1]["value"])
+        temperature = weekly_embed["fields"][0]["value"]
+        self.assertIn("**23.0°C**", temperature)
+        self.assertIn("전주 대비 ▲ 5.0°C", temperature)
+        self.assertIn("전일 대비 ▲ 1.0°C", daily_embed["fields"][0]["value"])
+
+    def test_rich_payload_is_delivered_with_plain_text_fallback(self):
+        from app.services import discord_alert_service as discord
+
+        calls = []
+
+        def fake_post(url, body):
+            calls.append(body)
+            return ("embeds" not in body, 400 if "embeds" in body else 204)
+
+        with mock.patch.object(discord, "_post_webhook", side_effect=fake_post):
+            ok = discord.send_discord_message(
+                "plain", "https://discord.com/api/webhooks/1/x",
+                payload={"content": "# 주간", "embeds": [{"title": "t"}]},
+            )
+        self.assertTrue(ok)
+        self.assertEqual(calls[-1], {"content": "plain"})
 
     def test_work_log_crud_api(self):
         created = self.client.post("/api/work-logs", json={

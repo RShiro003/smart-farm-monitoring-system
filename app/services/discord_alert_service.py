@@ -78,35 +78,13 @@ def resolve_webhook_url(webhook_url=None):
     return os.environ.get(WEBHOOK_ENV_NAME, "").strip()
 
 
-def send_discord_message(message, webhook_url=None):
-    """Discord Webhook으로 알림 메시지를 보낸다.
-
-    Webhook URL이 없거나 Discord 호출이 실패해도 센서 저장 요청은 실패하면 안 된다.
-    그래서 이 함수는 예외를 밖으로 던지지 않고 콘솔 로그와 False 반환으로만 알린다.
-
-    webhook_url을 넘기면 장치별로 다른 채널에 보낼 수 있다.
-    """
-    webhook_url = resolve_webhook_url(webhook_url)
-    if not webhook_url:
-        print(f"[Discord] {WEBHOOK_ENV_NAME} is not set. Alert skipped.")
-        return False
-    if not discord_webhook_url_is_allowed(webhook_url):
-        print("[Discord] Refused non-Discord webhook URL.")
-        return False
-
-    # Outbox jobs are split before sending, so completed parts are not resent
-    # when another part fails. Direct callers also get size-safe delivery.
-    for part in split_discord_message(message):
-        if not _send_payload(_message_payload(part), webhook_url):
-            return False
-    return True
-
-
-def _send_payload(payload, webhook_url):
-    payload = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+def _post_webhook(webhook_url, body):
+    """Webhook에 JSON body를 보내고 (성공 여부, HTTP 상태 코드)를 돌려준다."""
+    # 요약 본문에 장치 별칭 등 사용자 입력이 섞이므로 @everyone 같은 멘션은 항상 막는다.
+    body = {**body, "allowed_mentions": {"parse": []}}
     request = urllib.request.Request(
         webhook_url,
-        data=payload,
+        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
         headers={
             "Content-Type": "application/json",
             "User-Agent": "smart-farm-monitoring-system",
@@ -117,12 +95,48 @@ def _send_payload(payload, webhook_url):
     try:
         with urllib.request.urlopen(request, timeout=5) as response:
             if 200 <= response.status < 300:
-                return True
+                return True, response.status
             print(f"[Discord] Webhook returned HTTP {response.status}.")
-            return False
+            return False, response.status
     except urllib.error.HTTPError as e:
         print(f"[Discord] Webhook failed with HTTP {e.code}.")
         e.close()
+        return False, e.code
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         print(f"[Discord] Webhook request failed: {e}")
-    return False
+    return False, None
+
+
+def send_discord_message(message, webhook_url=None, payload=None):
+    """Discord Webhook으로 알림 메시지를 보낸다.
+
+    Webhook URL이 없거나 Discord 호출이 실패해도 센서 저장 요청은 실패하면 안 된다.
+    그래서 이 함수는 예외를 밖으로 던지지 않고 콘솔 로그와 False 반환으로만 알린다.
+
+    webhook_url을 넘기면 장치별로 다른 채널에 보낼 수 있다.
+    payload(dict)를 넘기면 임베드 등 Discord 본문을 그대로 보내고,
+    Discord가 형식 오류(HTTP 400)로 거절하면 message를 일반 텍스트로 한 번 더 보낸다.
+    """
+    webhook_url = resolve_webhook_url(webhook_url)
+    if not webhook_url:
+        print(f"[Discord] {WEBHOOK_ENV_NAME} is not set. Alert skipped.")
+        return False
+    if not discord_webhook_url_is_allowed(webhook_url):
+        print("[Discord] Refused non-Discord webhook URL.")
+        return False
+
+    if isinstance(payload, dict) and payload:
+        ok, status = _post_webhook(webhook_url, payload)
+        if ok or status != 400:
+            return ok
+        print("[Discord] Rich payload rejected; falling back to plain text.")
+        bodies = ({"content": part} for part in _text_chunks(message, 2000))
+    else:
+        # Existing queued summaries without a rich payload keep their color
+        # cards and size-safe, independently retryable outbox parts.
+        bodies = (_message_payload(part) for part in split_discord_message(message))
+    for body in bodies:
+        ok, _ = _post_webhook(webhook_url, body)
+        if not ok:
+            return False
+    return True
