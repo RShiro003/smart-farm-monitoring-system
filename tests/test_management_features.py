@@ -11,6 +11,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+import threading
 import unittest
 import warnings
 from datetime import datetime, timedelta
@@ -353,6 +354,408 @@ class AlertSettingsTests(_BaseCase):
 
 
 # ── ⑦ CSV 내보내기 ─────────────────────────────────────────────────────────────
+
+class SeparateWebhookTests(_BaseCase):
+    ALERT_URL = "https://discord.com/api/webhooks/alert/token"
+    SUMMARY_URL = "https://discord.com/api/webhooks/summary/token"
+
+    def test_upstream_payload_migration_preserves_report_and_retry_state(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        payload = json.dumps({"content": "# 주간", "embeds": [{"title": "existing report"}]})
+        try:
+            conn.execute("""CREATE TABLE notification_outbox (
+                id INTEGER PRIMARY KEY, device_id TEXT, message TEXT, payload TEXT,
+                status TEXT, attempts INTEGER, next_attempt_at TEXT, claimed_at TEXT,
+                sent_at TEXT, last_error TEXT, created_at TEXT)""")
+            conn.execute("INSERT INTO notification_outbox VALUES "
+                         "(1, 'esp32_01', ?, ?, 'pending', 2, '2000-01-01', NULL, NULL, NULL, '2000-01-01')",
+                         ("[스마트팜 주간 요약]\nreport", payload))
+            conn.commit()
+            alert_service._ensure_tables(conn)
+            alert_service._ensure_tables(conn)
+            row = conn.execute("SELECT notification_type, payload, status, attempts FROM notification_outbox").fetchone()
+            self.assertEqual(tuple(row), ("summary", payload, "pending", 2))
+        finally:
+            conn.close()
+
+    def test_rich_report_retry_preserves_payload_and_summary_destination(self):
+        alert_service.save_alert_settings("esp32_01", {
+            "webhook_url": self.ALERT_URL, "summary_webhook_url": self.SUMMARY_URL,
+        })
+        payload = {"content": "# 주간", "embeds": [{"title": "report", "color": 0x9B59B6}]}
+        # Even a long fallback text must not duplicate the same rich report.
+        message = "[스마트팜 주간 요약]\n" + "가" * 5000
+        conn = alert_service._connect()
+        try:
+            alert_service._enqueue_notification(conn, "esp32_01", message,
+                                                notification_type="summary", payload=payload)
+            conn.commit()
+        finally:
+            conn.close()
+        self.discord.side_effect = [False, True]
+        self.assertEqual(alert_service.deliver_pending_notifications(), 0)
+        conn = sqlite3.connect(_SENSOR_DB)
+        try:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM notification_outbox").fetchone()[0], 1)
+            conn.execute("UPDATE notification_outbox SET next_attempt_at = '2000-01-01 00:00:00'")
+            conn.commit()
+        finally:
+            conn.close()
+        self.assertEqual(alert_service.deliver_pending_notifications(), 1)
+        self.assertEqual(alert_service.deliver_pending_notifications(), 0)
+        self.assertEqual(self.discord.call_count, 2)
+        for call in self.discord.call_args_list:
+            self.assertEqual(call.args, (message,))
+            self.assertEqual(call.kwargs, {"webhook_url": self.SUMMARY_URL, "payload": payload})
+
+    def test_concurrent_partial_saves_preserve_both_webhooks(self):
+        for already_configured in (False, True):
+            with self.subTest(already_configured=already_configured):
+                self._clear()
+                if already_configured:
+                    alert_service.save_alert_settings("esp32_01", {"daily_summary": True})
+                first_read = threading.Event()
+                release_first = threading.Event()
+                second_finished = threading.Event()
+                errors = []
+                read_settings = alert_service._read_settings
+
+                def paused_read(conn, target):
+                    row = read_settings(conn, target)
+                    if threading.current_thread().name == "alert-webhook-save" and not first_read.is_set():
+                        first_read.set()
+                        if not release_first.wait(5):
+                            raise RuntimeError("test did not release first save")
+                    return row
+
+                def save(values, finished=None):
+                    try:
+                        alert_service.save_alert_settings("esp32_01", values)
+                    except Exception as error:
+                        errors.append(error)
+                    finally:
+                        if finished is not None:
+                            finished.set()
+
+                first = threading.Thread(target=save, name="alert-webhook-save",
+                                         args=({"webhook_url": self.ALERT_URL},))
+                second = threading.Thread(target=save, name="summary-webhook-save",
+                                          args=({"summary_webhook_url": self.SUMMARY_URL}, second_finished))
+                with mock.patch.object(alert_service, "_read_settings", side_effect=paused_read):
+                    try:
+                        first.start()
+                        self.assertTrue(first_read.wait(5))
+                        second.start()
+                        # Before the fix, the second save can commit after the
+                        # first read but before its write. Afterward it waits.
+                        second_finished.wait(0.5)
+                    finally:
+                        release_first.set()
+                        first.join(5)
+                        if second.ident is not None:
+                            second.join(5)
+                self.assertFalse(first.is_alive())
+                self.assertFalse(second.is_alive())
+                self.assertEqual(errors, [])
+                settings = alert_service.get_alert_settings("esp32_01")
+                self.assertEqual(settings["webhook_url"], self.ALERT_URL)
+                self.assertEqual(settings["summary_webhook_url"], self.SUMMARY_URL)
+
+    def test_reset_failure_is_not_reported_as_missing_settings(self):
+        alert_service.save_alert_settings("esp32_01", {"summary_webhook_url": self.SUMMARY_URL})
+        with mock.patch.object(alert_service, "_ensure_tables", side_effect=sqlite3.OperationalError("locked")), \
+                mock.patch.object(app.logger, "exception"):
+            response = self.client.delete("/api/alert-settings/esp32_01")
+        self.assertEqual(response.status_code, 503)
+        settings = alert_service.get_alert_settings("esp32_01")
+        self.assertEqual(settings["summary_webhook_url"], self.SUMMARY_URL)
+
+    def test_failed_save_rolls_back_and_releases_write_lock(self):
+        alert_service.save_alert_settings("esp32_01", {"webhook_url": self.ALERT_URL})
+        with mock.patch.object(alert_service, "_read_settings", side_effect=sqlite3.OperationalError("read failed")), \
+                mock.patch.object(app.logger, "exception"):
+            response = self.client.put("/api/alert-settings", json={
+                "device_id": "esp32_01", "webhook_url": None,
+                "summary_webhook_url": self.SUMMARY_URL,
+            })
+        self.assertEqual(response.status_code, 503)
+        settings = alert_service.get_alert_settings("esp32_01")
+        self.assertEqual(settings["webhook_url"], self.ALERT_URL)
+        self.assertIsNone(settings["summary_webhook_url"])
+        response = self.client.put("/api/alert-settings", json={
+            "device_id": "esp32_01", "summary_webhook_url": self.SUMMARY_URL,
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(alert_service.get_alert_settings("esp32_01")["summary_webhook_url"], self.SUMMARY_URL)
+
+    def test_successful_reset_routes_queued_jobs_using_global_destinations(self):
+        alert_service.save_alert_settings(None, {
+            "webhook_url": self.ALERT_URL, "summary_webhook_url": self.SUMMARY_URL,
+        })
+        alert_service.save_alert_settings("esp32_01", {
+            "webhook_url": self.ALERT_URL + "-override",
+            "summary_webhook_url": self.SUMMARY_URL + "-override",
+        })
+        conn = alert_service._connect()
+        try:
+            alert_service._enqueue_notification(conn, "esp32_01", "ordinary alert")
+            alert_service._enqueue_notification(conn, "esp32_01", "[스마트팜 일간 요약]\nreport",
+                                                notification_type="summary")
+            conn.commit()
+        finally:
+            conn.close()
+        response = self.client.delete("/api/alert-settings/esp32_01")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(alert_service.deliver_pending_notifications(), 2)
+        self.assertEqual([call.kwargs["webhook_url"] for call in self.discord.call_args_list],
+                         [self.ALERT_URL, self.SUMMARY_URL])
+
+    def test_first_device_override_preserves_effective_global_settings(self):
+        alert_service.save_alert_settings(None, {
+            "webhook_url": self.ALERT_URL, "summary_webhook_url": self.SUMMARY_URL,
+            "temperature": False, "daily_summary": True, "summary_hour": 9,
+        })
+        response = self.client.put("/api/alert-settings", json={
+            "device_id": "esp32_01", "weekly_summary": True,
+        })
+        self.assertEqual(response.status_code, 200)
+        settings = alert_service.get_alert_settings("esp32_01")
+        self.assertEqual(settings["webhook_url"], self.ALERT_URL)
+        self.assertFalse(settings["temperature"])
+        self.assertTrue(settings["daily_summary"])
+        self.assertTrue(settings["weekly_summary"])
+        self.assertEqual(settings["summary_hour"], 9)
+        # Summary fallback must stay inherited, not become a stale URL copy.
+        changed_url = self.SUMMARY_URL + "-changed"
+        alert_service.save_alert_settings(None, {"summary_webhook_url": changed_url})
+        settings = alert_service.get_alert_settings("esp32_01")
+        self.assertEqual(settings["summary_webhook_url"], changed_url)
+        self.assertTrue(settings["summary_webhook_inherited"])
+
+    def test_settings_read_failure_does_not_send_to_environment_destination(self):
+        alert_service.save_alert_settings("esp32_01", {"summary_webhook_url": self.SUMMARY_URL})
+        conn = alert_service._connect()
+        try:
+            alert_service._enqueue_notification(conn, "esp32_01", "[스마트팜 일간 요약]\nreport",
+                                                notification_type="summary")
+            conn.commit()
+        finally:
+            conn.close()
+        with mock.patch.object(alert_service, "_read_settings", side_effect=sqlite3.OperationalError("locked")):
+            self.assertEqual(alert_service.deliver_pending_notifications(), 0)
+        self.discord.assert_not_called()
+        conn = sqlite3.connect(_SENSOR_DB)
+        try:
+            row = conn.execute("SELECT status, attempts, last_error FROM notification_outbox").fetchone()
+            self.assertEqual(row, ("pending", 1, "Alert settings unavailable"))
+            conn.execute("UPDATE notification_outbox SET next_attempt_at = '2000-01-01 00:00:00'")
+            conn.commit()
+        finally:
+            conn.close()
+        self.assertEqual(alert_service.deliver_pending_notifications(), 1)
+        self.discord.assert_called_once()
+        self.assertEqual(self.discord.call_args.kwargs["webhook_url"], self.SUMMARY_URL)
+
+    def test_settings_api_returns_unavailable_instead_of_fake_defaults(self):
+        with mock.patch.object(alert_service, "_read_settings", side_effect=sqlite3.OperationalError("locked")), \
+                self.assertLogs(app.logger, level="ERROR"):
+            response = self.client.get("/api/alert-settings")
+        self.assertEqual(response.status_code, 503)
+        self.assertNotIn("settings", response.get_json())
+
+    def test_first_device_override_still_honors_explicit_clear(self):
+        alert_service.save_alert_settings(None, {
+            "webhook_url": self.ALERT_URL, "summary_webhook_url": self.SUMMARY_URL,
+        })
+        response = self.client.put("/api/alert-settings", json={
+            "device_id": "esp32_01", "webhook_url": None, "summary_webhook_url": None,
+        })
+        self.assertEqual(response.status_code, 200)
+        settings = alert_service.get_alert_settings("esp32_01")
+        self.assertIsNone(settings["webhook_url"])
+        self.assertEqual(settings["summary_webhook_url"], self.SUMMARY_URL)
+        self.assertTrue(settings["summary_webhook_inherited"])
+
+    def test_interrupted_migration_can_retry_summary_classification(self):
+        class InterruptedMigration(sqlite3.Connection):
+            fail_classification = True
+
+            def execute(self, sql, parameters=()):
+                if self.fail_classification and sql.startswith("UPDATE notification_outbox SET notification_type"):
+                    raise sqlite3.OperationalError("simulated migration interruption")
+                return super().execute(sql, parameters)
+
+        conn = sqlite3.connect(":memory:", factory=InterruptedMigration)
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("""CREATE TABLE notification_outbox (
+                id INTEGER PRIMARY KEY, device_id TEXT, message TEXT, status TEXT,
+                attempts INTEGER, next_attempt_at TEXT, claimed_at TEXT, sent_at TEXT,
+                last_error TEXT, created_at TEXT)""")
+            conn.execute("INSERT INTO notification_outbox VALUES "
+                         "(1, 'esp32_01', ?, 'pending', 2, '2000-01-01', NULL, NULL, NULL, '2000-01-01')",
+                         ("[스마트팜 일간 요약]\nreport",))
+            conn.commit()
+            with self.assertRaises(sqlite3.OperationalError):
+                alert_service._ensure_tables(conn)
+            conn.rollback()
+            conn.fail_classification = False
+            alert_service._ensure_tables(conn)
+            row = conn.execute("SELECT notification_type, status, attempts FROM notification_outbox").fetchone()
+            self.assertEqual(tuple(row), ("summary", "pending", 2))
+        finally:
+            conn.close()
+
+    def test_api_stores_both_urls_without_echoing_secrets(self):
+        for method in (self.client.put, self.client.post):
+            response = method("/api/alert-settings", json={
+                "device_id": "esp32_01", "webhook_url": self.ALERT_URL,
+                "summary_webhook_url": "  " + self.SUMMARY_URL + "  ",
+            })
+            self.assertEqual(response.status_code, 200)
+            for result in (response, self.client.get("/api/alert-settings?device_id=esp32_01")):
+                body = result.get_json()
+                settings = body.get("settings", body)
+                self.assertNotIn("webhook_url", settings)
+                self.assertNotIn("summary_webhook_url", settings)
+                self.assertTrue(settings["webhook_configured"])
+                self.assertTrue(settings["summary_webhook_configured"])
+                self.assertNotIn(self.SUMMARY_URL, result.get_data(as_text=True))
+            saved = alert_service.get_alert_settings("esp32_01")
+            self.assertEqual(saved["webhook_url"], self.ALERT_URL)
+            self.assertEqual(saved["summary_webhook_url"], self.SUMMARY_URL)
+
+    def test_partial_updates_and_clearing_are_independent(self):
+        alert_service.save_alert_settings("esp32_01", {
+            "webhook_url": self.ALERT_URL, "summary_webhook_url": self.SUMMARY_URL,
+        })
+        self.client.put("/api/alert-settings", json={"device_id": "esp32_01", "daily_summary": True})
+        settings = alert_service.get_alert_settings("esp32_01")
+        self.assertEqual(settings["webhook_url"], self.ALERT_URL)
+        self.assertEqual(settings["summary_webhook_url"], self.SUMMARY_URL)
+        self.client.put("/api/alert-settings", json={"device_id": "esp32_01", "summary_webhook_url": None})
+        settings = alert_service.get_alert_settings("esp32_01")
+        self.assertEqual(settings["webhook_url"], self.ALERT_URL)
+        self.assertIsNone(settings["summary_webhook_url"])
+        self.client.put("/api/alert-settings", json={
+            "device_id": "esp32_01", "webhook_url": None, "summary_webhook_url": self.SUMMARY_URL,
+        })
+        settings = alert_service.get_alert_settings("esp32_01")
+        self.assertIsNone(settings["webhook_url"])
+        self.assertEqual(settings["summary_webhook_url"], self.SUMMARY_URL)
+
+    def test_invalid_summary_url_rejects_entire_update(self):
+        alert_service.save_alert_settings("esp32_01", {"webhook_url": self.ALERT_URL})
+        for invalid in (123, [], {}, "http://discord.com/api/webhooks/test", "https://example.com/api/webhooks/test"):
+            with self.subTest(invalid=invalid):
+                response = self.client.put("/api/alert-settings", json={
+                    "device_id": "esp32_01", "webhook_url": None, "summary_webhook_url": invalid,
+                })
+                self.assertEqual(response.status_code, 400)
+                self.assertIn("summary_webhook_url", response.get_json()["details"])
+                self.assertEqual(alert_service.get_alert_settings("esp32_01")["webhook_url"], self.ALERT_URL)
+
+    def test_existing_device_inherits_global_summary_and_can_override(self):
+        alert_service.save_alert_settings("esp32_01", {"webhook_url": self.ALERT_URL})
+        alert_service.save_alert_settings(None, {"summary_webhook_url": self.SUMMARY_URL})
+        settings = alert_service.get_alert_settings("esp32_01")
+        self.assertEqual(settings["summary_webhook_url"], self.SUMMARY_URL)
+        self.assertTrue(settings["summary_webhook_inherited"])
+        alert_service.save_alert_settings("esp32_01", {"summary_webhook_url": self.ALERT_URL})
+        settings = alert_service.get_alert_settings("esp32_01")
+        self.assertEqual(settings["summary_webhook_url"], self.ALERT_URL)
+        self.assertFalse(settings["summary_webhook_inherited"])
+        alert_service.save_alert_settings("esp32_01", {"summary_webhook_url": None})
+        self.assertEqual(alert_service.get_alert_settings("esp32_01")["summary_webhook_url"], self.SUMMARY_URL)
+
+    def test_threshold_recovery_and_offline_use_alert_destination(self):
+        alert_service.save_alert_settings("esp32_01", {
+            "webhook_url": self.ALERT_URL, "summary_webhook_url": self.SUMMARY_URL,
+        })
+        threshold_service.upsert_thresholds("esp32_01", {"temperature_min": 18, "temperature_max": 25})
+        self._post_sensor(temperature=40)
+        self._post_sensor(temperature=22)
+        conn = sqlite3.connect(_SENSOR_DB)
+        try:
+            conn.execute("UPDATE sensor_data SET server_received_at = '2000-01-01 00:00:00'")
+            conn.commit()
+        finally:
+            conn.close()
+        alert_service.check_device_offline()
+        messages = [call.args[0] for call in self.discord.call_args_list]
+        self.assertTrue(any("복구" in message for message in messages))
+        self.assertTrue(any("장치 무응답" in message for message in messages))
+        self.assertGreaterEqual(len(messages), 3)
+        self.assertTrue(all(call.kwargs["webhook_url"] == self.ALERT_URL for call in self.discord.call_args_list))
+
+    def test_daily_weekly_routing_with_summary_override_and_legacy_fallback(self):
+        for separate in (False, True):
+            with self.subTest(separate=separate):
+                self._clear()
+                self.discord.reset_mock()
+                self._insert_row_at("esp32_01", datetime(2026, 9, 15, 12), temperature=24)
+                alert_service.save_alert_settings("esp32_01", {
+                    "daily_summary": True, "weekly_summary": True,
+                    "webhook_url": self.ALERT_URL,
+                    "summary_webhook_url": self.SUMMARY_URL if separate else None,
+                })
+                self.assertEqual(alert_service.queue_due_summaries(datetime(2026, 9, 16, 9)), 2)
+                self.assertEqual(alert_service.deliver_pending_notifications(), 2)
+                expected = self.SUMMARY_URL if separate else self.ALERT_URL
+                self.assertEqual([call.kwargs["webhook_url"] for call in self.discord.call_args_list], [expected, expected])
+
+    def test_migration_preserves_old_jobs_and_settings(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.executescript("""
+                CREATE TABLE alert_settings (
+                    device_id TEXT PRIMARY KEY, temperature INTEGER DEFAULT 1,
+                    humidity INTEGER DEFAULT 1, soil_moisture INTEGER DEFAULT 1,
+                    light INTEGER DEFAULT 1, device_offline INTEGER DEFAULT 1,
+                    cooldown_minutes REAL, webhook_url TEXT, updated_at TEXT NOT NULL);
+                CREATE TABLE notification_outbox (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT NOT NULL,
+                    message TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+                    attempts INTEGER DEFAULT 0, next_attempt_at TEXT NOT NULL,
+                    claimed_at TEXT, sent_at TEXT, last_error TEXT, created_at TEXT NOT NULL);
+            """)
+            conn.execute("INSERT INTO alert_settings(device_id, webhook_url, updated_at) VALUES (?, ?, ?)",
+                         ("esp32_01", self.ALERT_URL, "2026-10-01"))
+            jobs = [("[스마트팜 일간 요약]\nreport", "pending", 2),
+                    ("[스마트팜 주간 요약]\nreport", "sent", 1),
+                    ("[스마트팜 장치 무응답]\nalert", "failed", 8)]
+            for message, status, attempts in jobs:
+                conn.execute("INSERT INTO notification_outbox "
+                             "(device_id, message, status, attempts, next_attempt_at, created_at) "
+                             "VALUES ('esp32_01', ?, ?, ?, '2026-10-01', '2026-10-01')",
+                             (message, status, attempts))
+            alert_service._ensure_tables(conn)
+            alert_service._ensure_tables(conn)
+            settings = alert_service._resolve_settings(conn, "esp32_01")
+            self.assertEqual(settings["webhook_url"], self.ALERT_URL)
+            self.assertIsNone(settings["summary_webhook_url"])
+            rows = conn.execute("SELECT message, status, attempts, notification_type FROM notification_outbox ORDER BY id").fetchall()
+            self.assertEqual([tuple(row) for row in rows],
+                             [(*job, kind) for job, kind in zip(jobs, ("summary", "summary", "alert"))])
+        finally:
+            conn.close()
+
+    def test_summary_only_configuration_does_not_redirect_alerts(self):
+        alert_service.save_alert_settings("esp32_01", {"summary_webhook_url": self.SUMMARY_URL})
+        conn = alert_service._connect()
+        try:
+            alert_service._enqueue_notification(conn, "esp32_01", "ordinary alert")
+            alert_service._enqueue_notification(conn, "esp32_01", "[스마트팜 일간 요약]\nreport",
+                                                notification_type="summary")
+            conn.commit()
+        finally:
+            conn.close()
+        self.assertEqual(alert_service.deliver_pending_notifications(), 2)
+        self.assertEqual([call.kwargs["webhook_url"] for call in self.discord.call_args_list],
+                         [None, self.SUMMARY_URL])
+
 
 class CsvExportTests(_BaseCase):
     def test_sensor_csv_has_header_and_rows(self):
@@ -977,6 +1380,102 @@ class AlertConfirmationSummaryAndWorkLogTests(_BaseCase):
         self.assertIn("스마트팜 일간 요약", message)
         self.assertIn("평균 24", message)
 
+    def test_queued_daily_and_weekly_summaries_deliver_as_distinct_cards(self):
+        from app.services import discord_alert_service
+
+        for day, temperature in ((13, 20), (15, 24)):
+            self._insert_row_at(
+                "esp32_01", datetime(2026, 9, day, 12),
+                temperature=temperature, light=3500, light_unit="lux",
+            )
+        alert_service.save_alert_settings("esp32_01", {
+            "daily_summary": True, "weekly_summary": True,
+            "summary_hour": 8, "summary_weekday": 0,
+            "webhook_url": "https://discord.com/api/webhooks/test-id/test-token",
+        })
+        now = datetime(2026, 9, 16, 9)
+        self.assertEqual(alert_service.queue_due_summaries(now), 2)
+        self.assertEqual(alert_service.queue_due_summaries(now), 0)
+
+        self.discord.side_effect = discord_alert_service.send_discord_message
+        with mock.patch.object(discord_alert_service.urllib.request, "urlopen") as send:
+            send.return_value.__enter__.return_value.status = 204
+            self.assertEqual(alert_service.deliver_pending_notifications(), 2)
+            self.assertEqual(alert_service.deliver_pending_notifications(), 0)
+        embeds = [json.loads(call.args[0].data)["embeds"][0] for call in send.call_args_list]
+        self.assertEqual(len(embeds), 2)
+        self.assertEqual([item["color"] for item in embeds], [0x3498DB, 0x9B59B6])
+        self.assertIn("DAILY", embeds[0]["author"]["name"])
+        self.assertIn("2026-09-15 00:00 ~ 2026-09-15 23:59", embeds[0]["description"])
+        self.assertIn("**24.0°C**", embeds[0]["fields"][0]["value"])
+        self.assertIn("WEEKLY", embeds[1]["author"]["name"])
+        self.assertIn("2026-09-07 00:00 ~ 2026-09-13 23:59", embeds[1]["description"])
+        self.assertIn("**20.0°C**", embeds[1]["fields"][0]["value"])
+        conn = sqlite3.connect(_SENSOR_DB)
+        try:
+            rows = conn.execute(
+                "SELECT payload, status, attempts FROM notification_outbox ORDER BY id"
+            ).fetchall()
+        finally:
+            conn.close()
+        for row, embed in zip(rows, embeds):
+            self.assertEqual(json.loads(row[0])["embeds"][0], embed)
+            self.assertEqual(row[1:], ("sent", 1))
+
+    def test_split_summary_retries_only_failed_parts_including_legacy_jobs(self):
+        from app.services.discord_alert_service import split_discord_message
+
+        message = "[스마트팜 주간 요약]\n" + "앞" * 4096 + "중" * 4096 + "끝"
+        parts = split_discord_message(message)
+        for legacy in (False, True):
+            with self.subTest(legacy=legacy):
+                self._clear()
+                summary_url = "https://discord.com/api/webhooks/summary/token"
+                alert_service.save_alert_settings("esp32_01", {
+                    "webhook_url": "https://discord.com/api/webhooks/alert/token",
+                    "summary_webhook_url": summary_url,
+                })
+                conn = sqlite3.connect(_SENSOR_DB)
+                try:
+                    if legacy:
+                        # A pre-split job after the schema migration has classified it.
+                        conn.execute(
+                            "INSERT INTO notification_outbox "
+                            "(device_id, message, notification_type, status, attempts, next_attempt_at, created_at) "
+                            "VALUES (?, ?, 'summary', 'pending', 0, ?, ?)",
+                            ("esp32_01", message, "2000-01-01 00:00:00", "2000-01-01 00:00:00"),
+                        )
+                    else:
+                        alert_service._enqueue_notification(conn, "esp32_01", message,
+                                                            notification_type="summary")
+                    conn.commit()
+                finally:
+                    conn.close()
+                self.discord.reset_mock()
+                self.discord.side_effect = [True, False, True]
+                self.assertEqual(alert_service.deliver_pending_notifications(), 2)
+                self.assertEqual([call.args[0] for call in self.discord.call_args_list], parts)
+                self.assertTrue(all(call.kwargs["webhook_url"] == summary_url
+                                    for call in self.discord.call_args_list))
+                conn = sqlite3.connect(_SENSOR_DB)
+                try:
+                    rows = conn.execute(
+                        "SELECT message, status, attempts FROM notification_outbox ORDER BY id"
+                    ).fetchall()
+                    self.assertEqual(rows, [(parts[0], "sent", 1),
+                                            (parts[1], "pending", 1), (parts[2], "sent", 1)])
+                    conn.execute("UPDATE notification_outbox SET next_attempt_at = ? WHERE status = 'pending'",
+                                 ("2000-01-01 00:00:00",))
+                    conn.commit()
+                finally:
+                    conn.close()
+                self.discord.reset_mock()
+                self.discord.side_effect = [True]
+                self.assertEqual(alert_service.deliver_pending_notifications(), 1)
+                self.assertEqual(alert_service.deliver_pending_notifications(), 0)
+                self.assertEqual(self.discord.call_args.args[0], parts[1])
+                self.assertEqual(self.discord.call_args.kwargs["webhook_url"], summary_url)
+                self.discord.assert_called_once()
     def test_daily_and_weekly_summaries_use_distinct_embed_styles(self):
         for day in range(7):
             self._insert_row_at(

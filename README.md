@@ -150,6 +150,34 @@ default, so you can set one default and override a few devices.
 means every alert is on and `ALERT_COOLDOWN_MINUTES` applies, matching the
 previous behaviour. A stored webhook lets one device alert a different channel.
 
+The panel has separate **일반 알림 Webhook URL** (`webhook_url`) and
+**요약 보고서 Webhook URL** (`summary_webhook_url`) inputs. Threshold alerts,
+recoveries and offline notifications use the former; both daily and weekly
+summaries use the latter. Summary routing is device summary URL → global summary
+URL → existing resolved alert URL → `DISCORD_WEBHOOK_URL`. Setting a global
+summary URL also applies to existing device settings without a summary override.
+Leaving an input blank when saving preserves its stored value; use its separate
+remove checkbox to clear it. Clearing a summary override restores the fallback
+chain; it does not disable summaries (use the daily/weekly switches for that).
+Settings read/write responses return configured flags, not webhook secrets.
+Creating a device-specific override preserves the global alert webhook and
+rules currently in use for fields omitted from the request. Those values become
+device-specific settings; the summary URL continues following the global summary
+URL until explicitly overridden. Existing device overrides are unchanged.
+If settings cannot be read, the settings API returns HTTP 503 and queued delivery
+is retried instead of falling back to an unintended channel.
+Concurrent partial saves are serialized so updating one webhook cannot overwrite
+an independently saved webhook. A failed reset also returns HTTP 503 instead of
+being reported as a successful return to global defaults.
+
+Existing databases are extended automatically without deleting sensor data or
+alert history. Pending notifications retain their kind through splitting and
+retries; pre-upgrade daily/weekly summaries are classified during migration.
+The column changes and classification are atomic, so an interrupted migration
+can safely be retried on restart.
+To apply this change, update and restart the Raspberry Pi server and refresh the
+dashboard. No ESP32 firmware update or new Discord bot is required.
+
 ### Alert confirmation and severity
 
 The alert settings panel can require both a minimum number of consecutive
@@ -174,6 +202,21 @@ temperature/humidity/soil/light average and range, warning/danger/recovery event
 counts, and offline events. Failed summary delivery follows the same retry policy
 as immediate alerts.
 
+Discord summaries use color-coded embed cards: blue for daily (1 day), purple
+for weekly (7 days), with explicit headings and DAILY/WEEKLY badges. Rich reports
+include period comparisons, collection coverage and a weekly daily-trend table.
+Their payload is stored with the notification type, so retries retain the report
+and use the summary webhook. If Discord rejects a rich payload with HTTP 400,
+delivery falls back to plain text. Mentions are disabled in all webhook messages.
+Legacy pending summaries without a stored payload still receive color-coded
+cards. Oversized legacy summaries are split at 4,096 UTF-16 units per description,
+and plain text at 2,000 units. Those outbox parts have independent retry state;
+successfully recorded parts are not resent when another part fails.
+Already-sent messages are not edited. Update and restart the Raspberry Pi service;
+no manual DB migration or webhook change is needed for the card styling.
+As with other webhook delivery, a network timeout after Discord has accepted a
+message can still cause a duplicate on retry.
+
 ## Manual Work Log
 
 `GET/POST /api/work-logs` and `DELETE /api/work-logs/<id>` manage operator-entered
@@ -187,8 +230,9 @@ times as purple vertical annotations on all sensor charts.
 `GET /api/export/sensor.csv` and `GET /api/export/events.csv` accept the same
 filters as the dashboard tables (`device_id`, `date`, `time_from`, `time_to`,
 plus `date_from`/`date_to` and `status`/`metric` for events), so a download matches
-what you were looking at. Rows are streamed one at a time rather than collected in memory, because a
-wide date range across several 30-second nodes is hundreds of thousands of rows. Output
+what you were looking at. Rows are streamed one at a time rather than collected
+in memory: wide date ranges across multiple nodes (including legacy 5-second
+data) can contain hundreds of thousands of rows. Output
 carries a UTF-8 BOM so Excel does not mangle the Korean headers, and each file
 includes the device label next to the id. All matching stored rows are exported;
 there is no silent 200,000-row cutoff. Large exports can take time, so use date
@@ -205,8 +249,31 @@ by CSV export; hourly rollups are not substituted for raw measurements.
 
 ## Retention and Downsampling
 
-One node at 30-second sampling writes ~2,880 rows/day, ~1.05M/year, and nothing
-used to delete or summarise them.
+One node at 30-second sampling writes approximately 2,880 rows/day or 1.05M/year.
+Legacy 5-second data is retained under the same retention policy.
+
+The real ESP32 samples and sends immediately after setup, then waits at least
+30 seconds from the actual previous measurement start (`SENSOR_SEND_INTERVAL_MS`).
+The timer is recorded after Wi-Fi/NTP/threshold lookups, so delays in those steps
+cannot shorten the next sampling gap. The dummy node updates its simulation
+every 5 seconds but sends only every 30 seconds. Its anomalies last 50–80 seconds
+(temperature/humidity) or 60–90 seconds (dry soil), and simulated watering lasts
+up to 20–35 seconds, independent of the send interval. Timers use elapsed time,
+including across the ESP32 clock's wraparound; blocking network work can delay
+the next simulation update. Network delays can
+make arrivals later; the real node still resends queued samples after an outage,
+so recovery can deliver several historical samples together. Dashboard refresh
+intervals are separate and unchanged; the server does not discard incoming rows
+to enforce the cadence. Flash the updated firmware onto each board: updating
+the Raspberry Pi alone does not change the sampling rate.
+
+The default offline timeout is 180 seconds. Soil-moisture rise detection uses
+a 300-second window and allows gaps up to 90 seconds for missed samples and jitter. Update
+the Pi server too, and if `WATERING_MAX_SAMPLE_GAP_SECONDS` is explicitly set
+to the old value `15`, change it to `90` and restart the service. Existing explicit
+`DEVICE_OFFLINE_SECONDS` values still override the 180-second default. The historical
+query buffer still accommodates 5-second data. Consecutive-sample alert rules
+now take longer to confirm; three readings span about 60 seconds instead of 10.
 
 `POST /api/maintenance/rollup` aggregates completed hours into
 `sensor_data_hourly` (avg/min/max plus lux and digital sample counts; the

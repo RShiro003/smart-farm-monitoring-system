@@ -17,15 +17,19 @@
 // 서버는 별도로 server_received_at을 저장하므로, ESP32 시간이 실패해도 수신 시각은 남는다.
 const long gmtOffset_sec = 9 * 3600;
 const int daylightOffset_sec = 0;
+const unsigned long SENSOR_SEND_INTERVAL_MS = 30000;
+unsigned long lastSensorCycleAt = 0;
+bool sensorCycleStarted = false;
+const unsigned long SIMULATION_INTERVAL_MS = 5000;
+unsigned long lastSimulationAt = 0;
+bool simulationStarted = false;
 
 // 이상상태는 너무 자주 발생하면 실제 환경처럼 보이지 않으므로,
 // 다음 이상상태 발생 시점을 2~5분 사이에서 랜덤하게 잡는다.
 const unsigned long ANOMALY_MIN_INTERVAL_MS = 120000;
 const unsigned long ANOMALY_MAX_INTERVAL_MS = 300000;
-// 실제 센서 노드와 같은 30초 전송 주기다.
-const unsigned long SENSOR_SEND_INTERVAL_MS = 30000;
 
-// 현재 더미 센서값은 loop마다 목표값을 향해 조금씩 이동한다.
+// 현재 더미 센서값은 5초 시뮬레이션 주기마다 목표값을 향해 조금씩 이동한다.
 // 완전 랜덤값을 매번 보내면 그래프가 튀기 때문에, 실제 센서처럼 완만한 추세를 만들기 위한 상태값이다.
 float currentTemperature = 24.0;
 float currentHumidity = 68.0;
@@ -42,15 +46,19 @@ enum DummyAnomalyState {
 };
 
 DummyAnomalyState currentAnomaly = ANOMALY_NONE;
-int anomalyLoopsRemaining = 0;
-unsigned long nextAnomalyAt = 0;
+unsigned long anomalyStartedAt = 0;
+unsigned long anomalyDurationMs = 0;
+unsigned long anomalyScheduledAt = 0;
+unsigned long anomalyWaitMs = 0;
+bool anomalyScheduled = false;
 float anomalyTargetTemperature = 30.0;
 float anomalyTargetHumidity = 50.0;
 float anomalyTargetSoilMoisture = 33.0;
 
 // 토양 건조 이상상태가 끝난 뒤 물을 준 것처럼 수분이 회복되는 구간을 시뮬레이션한다.
 bool wateringActive = false;
-int wateringLoopsRemaining = 0;
+unsigned long wateringStartedAt = 0;
+unsigned long wateringDurationMs = 0;
 float wateringTargetSoilMoisture = 68.0;
 
 const char* dummySensorStatus = "NORMAL";
@@ -138,30 +146,34 @@ const char* anomalyStateName(DummyAnomalyState state) {
 void scheduleNextAnomaly() {
   // 현재 이상상태가 끝난 뒤 다음 이상상태 발생 시각을 예약한다.
   // millis() 기준이라 loop가 계속 돌아도 별도 timer 없이 조건을 확인할 수 있다.
-  unsigned long interval = (unsigned long)random(
+  anomalyWaitMs = (unsigned long)random(
     (long)ANOMALY_MIN_INTERVAL_MS,
     (long)ANOMALY_MAX_INTERVAL_MS + 1
   );
-  nextAnomalyAt = millis() + interval;
+  anomalyScheduledAt = millis();
+  anomalyScheduled = true;
 }
 
 void startAnomalyIfNeeded() {
   // 예약 시간이 되었고 아직 이상상태가 없을 때 하나의 시나리오를 시작한다.
   // 한 번에 여러 이상상태가 겹치지 않게 currentAnomaly가 NORMAL일 때만 시작한다.
-  if (currentAnomaly != ANOMALY_NONE || nextAnomalyAt == 0 || millis() < nextAnomalyAt) {
+  if (currentAnomaly != ANOMALY_NONE || !anomalyScheduled ||
+      millis() - anomalyScheduledAt < anomalyWaitMs) {
     return;
   }
 
   currentAnomaly = (DummyAnomalyState)random(1, 4);
+  anomalyStartedAt = millis();
+  anomalyScheduled = false;
 
   if (currentAnomaly == ANOMALY_TEMP_HIGH) {
-    anomalyLoopsRemaining = random(10, 17);
+    anomalyDurationMs = (unsigned long)random(10, 17) * SIMULATION_INTERVAL_MS;
     anomalyTargetTemperature = randomFloat(29.0, 31.0);
   } else if (currentAnomaly == ANOMALY_HUMIDITY_LOW) {
-    anomalyLoopsRemaining = random(10, 17);
+    anomalyDurationMs = (unsigned long)random(10, 17) * SIMULATION_INTERVAL_MS;
     anomalyTargetHumidity = randomFloat(49.0, 52.0);
   } else {
-    anomalyLoopsRemaining = random(12, 19);
+    anomalyDurationMs = (unsigned long)random(12, 19) * SIMULATION_INTERVAL_MS;
     anomalyTargetSoilMoisture = randomFloat(31.0, 35.0);
     wateringActive = false;
   }
@@ -226,9 +238,14 @@ int getLightTargetByMinute(int minuteOfDay) {
 }
 
 void generateDummySensorData() {
-  // loop마다 호출되어 다음 전송에 사용할 더미 센서값을 갱신한다.
+  // 전송 주기와 별개인 5초 시뮬레이션 주기로 더미 센서값을 갱신한다.
   // 정상 패턴, 이상상태, 물주기 회복, 조도 일변화를 모두 이 함수에서 반영한다.
-  if (nextAnomalyAt == 0) {
+  if (currentAnomaly != ANOMALY_NONE &&
+      millis() - anomalyStartedAt >= anomalyDurationMs) {
+    currentAnomaly = ANOMALY_NONE;
+    scheduleNextAnomaly();
+  }
+  if (currentAnomaly == ANOMALY_NONE && !anomalyScheduled) {
     scheduleNextAnomaly();
   }
 
@@ -281,17 +298,20 @@ void generateDummySensorData() {
   } else {
     if (!wateringActive && currentSoilMoisture <= 38.0) {
       // 건조 상태가 충분히 심해지면 물을 준 상황을 시뮬레이션한다.
-      // 이후 몇 loop 동안 토양수분이 빠르게 회복되어 그래프에 관수 패턴이 나타난다.
+      // 전송 횟수와 무관하게 20~35초 동안 토양수분 회복을 시뮬레이션한다.
       wateringActive = true;
-      wateringLoopsRemaining = random(4, 8);
+      wateringStartedAt = millis();
+      wateringDurationMs = (unsigned long)random(4, 8) * SIMULATION_INTERVAL_MS;
       wateringTargetSoilMoisture = randomFloat(60.0, 75.0);
     }
 
+    if (wateringActive && millis() - wateringStartedAt >= wateringDurationMs) {
+      wateringActive = false;
+    }
     if (wateringActive) {
       currentSoilMoisture += randomFloat(3.0, 7.0);
-      wateringLoopsRemaining--;
 
-      if (currentSoilMoisture >= wateringTargetSoilMoisture || wateringLoopsRemaining <= 0) {
+      if (currentSoilMoisture >= wateringTargetSoilMoisture) {
         wateringActive = false;
       }
     } else {
@@ -311,15 +331,6 @@ void generateDummySensorData() {
     currentLight = clampInt(currentLight, 0, 300);
   }
 
-  if (activeAnomaly != ANOMALY_NONE) {
-    // 이상상태는 정해진 loop 수만 유지하고, 끝나면 다시 정상 패턴으로 돌아간다.
-    anomalyLoopsRemaining--;
-
-    if (anomalyLoopsRemaining <= 0) {
-      currentAnomaly = ANOMALY_NONE;
-      scheduleNextAnomaly();
-    }
-  }
 }
 
 void setup() {
@@ -360,13 +371,29 @@ void setup() {
 }
 
 void loop() {
-  // 1) 더미 센서값 생성
+  // 시뮬레이션은 기존 5초 속도를 유지하고 서버 전송만 30초로 제한한다.
+  // 장시간 통신 지연 뒤에도 누락된 시뮬레이션을 몰아서 재생하지 않는다.
+  unsigned long simulationNow = millis();
+  if (!simulationStarted || simulationNow - lastSimulationAt >= SIMULATION_INTERVAL_MS) {
+    generateDummySensorData();
+    lastSimulationAt = millis();
+    simulationStarted = true;
+  }
+  // 시뮬레이션 값은 자주 갱신하되 서버 전송 주기는 최소 30초로 제한한다.
+  // unsigned 차분은 millis() 순환에도 안전하며 누락된 주기를 몰아서 실행하지 않는다.
+  unsigned long cycleNow = millis();
+  if (sensorCycleStarted && cycleNow - lastSensorCycleAt < SENSOR_SEND_INTERVAL_MS) {
+    delay(10);
+    return;
+  }
+  lastSensorCycleAt = cycleNow;
+  sensorCycleStarted = true;
+
+  // 1) 현재 더미 센서값 읽기
   // 2) 현재 timestamp 생성
   // 3) JSON payload 조립
   // 4) Flask 서버의 /api/sensor로 POST
   // 이 순서를 30초마다 반복해 실제 센서 노드와 같은 서버 저장 흐름을 검증한다.
-  generateDummySensorData();
-
   float temperature = currentTemperature;
   float humidity = currentHumidity;
   int soilMoisture = (int)(currentSoilMoisture + 0.5);
@@ -446,5 +473,4 @@ void loop() {
     Serial.println("WiFi disconnected");
   }
 
-  delay(SENSOR_SEND_INTERVAL_MS);
 }
