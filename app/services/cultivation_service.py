@@ -55,8 +55,10 @@ WATERING_EVENT_UPDATE_SECONDS = min(
 WATERING_EXPECTED_INTERVAL_SECONDS = _env_int(
     "WATERING_EXPECTED_INTERVAL_SECONDS", 5
 )
+# Keep the query buffer sized for legacy 5-second history; new samples arrive
+# every 30 seconds. Allow 15 seconds of transport jitter before breaking a run.
 WATERING_MAX_SAMPLE_GAP_SECONDS = _env_int(
-    "WATERING_MAX_SAMPLE_GAP_SECONDS", 15
+    "WATERING_MAX_SAMPLE_GAP_SECONDS", 45
 )
 WATERING_POST_SAMPLE_COUNT = _env_int(
     "WATERING_POST_SAMPLE_COUNT", 3, minimum=2

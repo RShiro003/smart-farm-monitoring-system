@@ -17,6 +17,9 @@
 // 서버 DB의 device_id 컬럼, 대시보드 장치 필터, 임계값 설정 조회가 모두 이 값으로 연결된다.
 // 임계값은 사용자가 대시보드에서 바꿀 수 있으므로 주기적으로 서버에서 다시 가져온다.
 const unsigned long THRESHOLD_FETCH_INTERVAL_MS = 45000;
+const unsigned long SENSOR_SEND_INTERVAL_MS = 30000;
+unsigned long lastSensorSampleAt = 0;
+bool sensorSampleStarted = false;
 // 네트워크가 불안정할 때 loop가 오래 멈추지 않도록 HTTP/Wi-Fi 대기 시간을 제한한다.
 const unsigned long HTTP_TIMEOUT_MS = 3000;
 const unsigned long WIFI_CONNECT_TIMEOUT_MS = 15000;
@@ -397,6 +400,14 @@ void setup() {
 }
 
 void loop() {
+  // 실제 직전 측정 시작부터 최소 30초를 기다린다.
+  // unsigned 차분으로 millis() 순환에 대응하며, 지연된 주기를 몰아서 실행하지 않는다.
+  unsigned long cycleNow = millis();
+  if (sensorSampleStarted && cycleNow - lastSensorSampleAt < SENSOR_SEND_INTERVAL_MS) {
+    delay(10);
+    return;
+  }
+
   // 메인 루프 흐름:
   // 1) Wi-Fi 상태 확인 및 재연결
   // 2) 서버 임계값 주기적 조회
@@ -415,7 +426,7 @@ void loop() {
   if (WiFi.status() == WL_CONNECTED &&
       (!thresholdFetchAttempted ||
        now - lastThresholdFetchAt >= THRESHOLD_FETCH_INTERVAL_MS)) {
-    // 부팅 후 최초 1회, 이후 45초마다 서버 임계값을 가져온다.
+    // 부팅 후 최초 1회, 이후 45초 이상 지난 측정 주기에 서버 임계값을 가져온다.
     // 사용자가 대시보드에서 기준값을 바꾸면 다음 조회 시 ESP32 LED 판단에도 반영된다.
     lastThresholdFetchAt = now;
     thresholdFetchAttempted = true;
@@ -423,6 +434,11 @@ void loop() {
   }
 
   String timestamp = getTimestamp();
+
+  // Wi-Fi/NTP/임계값 조회가 지연되어도 다음 측정이 앞당겨지지 않도록
+  // 블로킹 작업이 끝난 뒤, 실제 센서를 읽기 직전에 기준 시각을 기록한다.
+  lastSensorSampleAt = millis();
+  sensorSampleStarted = true;
 
   // DHT22 온도/습도 측정.
   // 실패하면 -1로 보내 서버/대시보드에서 비정상 데이터임을 확인할 수 있게 한다.
@@ -519,7 +535,6 @@ void loop() {
     if (WiFi.status() != WL_CONNECTED) {
       enqueueSensorPayload(jsonData);
       Serial.println("WiFi disconnected. Sensor sample queued.");
-      delay(5000);
       return;
     }
 
@@ -549,5 +564,4 @@ void loop() {
     http.end();
   }
 
-  delay(5000);
 }
