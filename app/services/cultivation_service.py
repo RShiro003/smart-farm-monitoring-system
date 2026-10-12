@@ -54,9 +54,12 @@ WATERING_EVENT_UPDATE_SECONDS = min(
     ),
     WATERING_COOLDOWN_SECONDS,
 )
+# This sizes the history query, not the current sampling cadence. Preserve
+# enough rows for existing 5-second data within the detection window.
 WATERING_EXPECTED_INTERVAL_SECONDS = _env_int(
-    "WATERING_EXPECTED_INTERVAL_SECONDS", 30
+    "WATERING_EXPECTED_INTERVAL_SECONDS", 5
 )
+# Allow up to three 30-second intervals for missed samples and network jitter.
 WATERING_MAX_SAMPLE_GAP_SECONDS = _env_int(
     "WATERING_MAX_SAMPLE_GAP_SECONDS", 90
 )

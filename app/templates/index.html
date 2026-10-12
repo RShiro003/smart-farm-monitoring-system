@@ -548,13 +548,24 @@
             </select>
         </div>
         <div class="threshold-field" style="margin-top:8px">
-            <label for="alert-webhook">Discord Webhook URL</label>
+            <label for="alert-webhook">일반 알림 Webhook URL</label>
             <input id="alert-webhook" class="setting-input" type="url"
                    placeholder="비우면 서버 환경변수를 사용합니다">
             <label class="setting-hint" style="display:block;margin-top:6px">
                 <input id="alert-webhook-clear" type="checkbox">
-                저장된 장치별 웹훅 제거
+                이 대상의 일반 알림 웹훅 제거
             </label>
+            <div class="setting-hint">센서 이상·복구·장치 무응답 알림을 보냅니다. 기존 웹훅 설정은 유지됩니다.</div>
+        </div>
+        <div class="threshold-field" style="margin-top:8px">
+            <label for="alert-summary-webhook">요약 보고서 Webhook URL</label>
+            <input id="alert-summary-webhook" class="setting-input" type="url"
+                   placeholder="미설정 시 전체 요약 설정 또는 일반 알림 웹훅 사용">
+            <label class="setting-hint" style="display:block;margin-top:6px">
+                <input id="alert-summary-webhook-clear" type="checkbox">
+                이 대상의 요약 보고서 웹훅 제거
+            </label>
+            <div class="setting-hint">일간·주간 요약 전용입니다. 별도 채널의 웹훅을 입력하고 위 요약 항목을 켜세요. 입력란을 비운 채 저장하면 기존 값이 유지됩니다. 제거하면 전체 요약 설정, 없으면 일반 알림 웹훅을 사용합니다.</div>
         </div>
         <div class="threshold-actions" style="margin-top:10px">
             <button class="btn btn-primary" type="button" onclick="saveAlertSettings()">저장</button>

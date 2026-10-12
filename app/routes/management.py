@@ -132,14 +132,20 @@ def remove_device(device_id):
 
 # ── 알림 설정 ──────────────────────────────────────────────────────────────────
 
+def _public_alert_settings(settings):
+    public = dict(settings)
+    for field, flag in (("webhook_url", "webhook_configured"),
+                        ("summary_webhook_url", "summary_webhook_configured")):
+        public[flag] = bool(public.pop(field, None))
+    return public
+
+
 @management_bp.route("/api/alert-settings", methods=["GET"])
 def get_alert_settings_route():
     # device_id가 없으면 전역 기본 설정을 돌려준다.
     device_id = (request.args.get("device_id") or "").strip()
-    settings = get_alert_settings(device_id)
-    public_settings = dict(settings)
-    public_settings["webhook_configured"] = bool(public_settings.get("webhook_url"))
-    public_settings.pop("webhook_url", None)
+    settings = get_alert_settings(device_id, strict=True)
+    public_settings = _public_alert_settings(settings)
     return jsonify({
         "settings": public_settings,
         "fields": [
@@ -226,16 +232,18 @@ def save_alert_settings_route():
                 else:
                     values["cooldown_minutes"] = number
 
-    if "webhook_url" in payload:
-        value = payload["webhook_url"]
+    for field in ("webhook_url", "summary_webhook_url"):
+        if field not in payload:
+            continue
+        value = payload[field]
         if value is None or (isinstance(value, str) and not value.strip()):
-            values["webhook_url"] = None
+            values[field] = None
         elif not isinstance(value, str):
-            errors["webhook_url"] = "must be a string"
+            errors[field] = "must be a string"
         elif not discord_webhook_url_is_allowed(value.strip()):
-            errors["webhook_url"] = "must be a Discord HTTPS webhook URL"
+            errors[field] = "must be a Discord HTTPS webhook URL"
         else:
-            values["webhook_url"] = value.strip()
+            values[field] = value.strip()
 
     if errors:
         return jsonify({"error": "Invalid alert settings", "details": errors}), 400
@@ -246,7 +254,7 @@ def save_alert_settings_route():
     if not isinstance(device_id, str):
         return jsonify({"error": "device_id must be a string"}), 400
     device_id = device_id.strip()
-    return jsonify(save_alert_settings(device_id, values))
+    return jsonify(_public_alert_settings(save_alert_settings(device_id, values)))
 
 
 @management_bp.route("/api/alert-settings/<device_id>", methods=["DELETE"])

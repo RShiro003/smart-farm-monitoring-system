@@ -10,13 +10,13 @@ from .datetime_filters import datetime_conditions
 from .validation import finite_number, positive_int as _normalize_positive_int
 
 try:
-    from services.discord_alert_service import send_discord_message
+    from services.discord_alert_service import send_discord_message, split_discord_message
     from services.sensor_service import (
         DEFAULT_SENSOR_INTERVAL_SECONDS, LIGHT_UNIT_LUX, list_device_status, offline_after_seconds,
     )
     from services.threshold_service import DEFAULT_THRESHOLDS, get_or_create_thresholds
 except ModuleNotFoundError:
-    from app.services.discord_alert_service import send_discord_message
+    from app.services.discord_alert_service import send_discord_message, split_discord_message
     from app.services.sensor_service import (
         DEFAULT_SENSOR_INTERVAL_SECONDS, LIGHT_UNIT_LUX, list_device_status, offline_after_seconds,
     )
@@ -120,6 +120,7 @@ def _ensure_tables(conn):
             device_offline   INTEGER NOT NULL DEFAULT 1,
             cooldown_minutes REAL,
             webhook_url      TEXT,
+            summary_webhook_url TEXT,
             abnormal_count   INTEGER NOT NULL DEFAULT 1,
             recovery_count   INTEGER NOT NULL DEFAULT 1,
             abnormal_duration_seconds INTEGER NOT NULL DEFAULT 0,
@@ -173,6 +174,7 @@ def _ensure_tables(conn):
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             device_id       TEXT NOT NULL,
             message         TEXT NOT NULL,
+            notification_type TEXT NOT NULL DEFAULT 'alert',
             payload         TEXT,
             status          TEXT NOT NULL DEFAULT 'pending',
             attempts        INTEGER NOT NULL DEFAULT 0,
@@ -213,6 +215,7 @@ def _ensure_tables(conn):
     # 기존 설치 DB를 데이터 손실 없이 확장한다.
     migrations = {
         "alert_settings": {
+            "summary_webhook_url": "TEXT",
             "abnormal_count": "INTEGER NOT NULL DEFAULT 1",
             "recovery_count": "INTEGER NOT NULL DEFAULT 1",
             "abnormal_duration_seconds": "INTEGER NOT NULL DEFAULT 0",
@@ -232,19 +235,36 @@ def _ensure_tables(conn):
         "event_log": {
             "severity": "TEXT NOT NULL DEFAULT 'warning'",
         },
-        # 요약 보고서처럼 Discord 임베드로 보낼 알림의 JSON 본문이다.
-        # NULL이면 message를 일반 텍스트로 보낸다.
         "notification_outbox": {
+            "notification_type": "TEXT NOT NULL DEFAULT 'alert'",
+            # Preserve upstream rich reports alongside destination routing.
             "payload": "TEXT",
         },
     }
-    for table, columns in migrations.items():
-        existing = {
-            row["name"] for row in conn.execute(f"PRAGMA table_info({table})")
-        }
-        for name, definition in columns.items():
-            if name not in existing:
-                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+    # SQLite DDL alone does not start a transaction in Python's default mode.
+    # Keep the new column and classification atomic so an interrupted update
+    # cannot leave old summaries permanently marked as ordinary alerts.
+    conn.execute("SAVEPOINT alert_schema_migration")
+    try:
+        for table, columns in migrations.items():
+            existing = {
+                row["name"] for row in conn.execute(f"PRAGMA table_info({table})")
+            }
+            for name, definition in columns.items():
+                if name not in existing:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+                    if table == "notification_outbox" and name == "notification_type":
+                        # Classify old generated headings without requeuing jobs.
+                        conn.execute(
+                            "UPDATE notification_outbox SET notification_type = 'summary' "
+                            "WHERE message LIKE ? OR message LIKE ?",
+                            ("[스마트팜 일간 요약]\n%", "[스마트팜 주간 요약]\n%"),
+                        )
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT alert_schema_migration")
+        raise
+    finally:
+        conn.execute("RELEASE SAVEPOINT alert_schema_migration")
     conn.commit()
 
 
@@ -332,6 +352,7 @@ def _settings_row_to_dict(row, device_id):
         # None이면 "환경변수 기본값을 따른다"는 뜻이라 그대로 내려보낸다.
         "cooldown_minutes": float(cooldown) if cooldown is not None else None,
         "webhook_url": (row["webhook_url"] if row is not None else None),
+        "summary_webhook_url": (row["summary_webhook_url"] if row is not None else None),
         "updated_at": (row["updated_at"] if row is not None else None),
     }
     for field, default in ALERT_RULE_DEFAULTS.items():
@@ -366,13 +387,24 @@ def _resolve_settings(conn, device_id):
     if not resolved["webhook_url"]:
         # 저장된 URL이 없으면 discord_alert_service가 환경변수를 사용한다.
         resolved["webhook_url"] = None
+    # Existing device rows must also benefit from a newly configured global
+    # summary destination. The legacy alert webhook resolution is unchanged.
+    resolved["summary_webhook_inherited"] = bool(
+        resolved["source"] == "global" and resolved["summary_webhook_url"]
+    )
+    if not resolved["summary_webhook_url"] and device_id != GLOBAL_SETTINGS_ID:
+        global_row = _read_settings(conn, GLOBAL_SETTINGS_ID)
+        if global_row is not None and global_row["summary_webhook_url"]:
+            resolved["summary_webhook_url"] = global_row["summary_webhook_url"]
+            resolved["summary_webhook_inherited"] = True
     return resolved
 
 
-def get_alert_settings(device_id=None):
+def get_alert_settings(device_id=None, *, strict=False):
     """대시보드 알림 설정 화면이 읽는 값이다.
 
     device_id를 주지 않으면 전역 기본 설정을 돌려준다.
+    strict=True이면 조회 실패를 기본 설정으로 숨기지 않는다.
     """
     target = (device_id or "").strip() or GLOBAL_SETTINGS_ID
     conn = _connect()
@@ -380,6 +412,8 @@ def get_alert_settings(device_id=None):
         _ensure_tables(conn)
         return _resolve_settings(conn, target)
     except sqlite3.Error as e:
+        if strict:
+            raise
         print(f"[Alert] Failed to read alert settings: {e}")
         return {
             "device_id": target,
@@ -387,6 +421,8 @@ def get_alert_settings(device_id=None):
             **ALERT_RULE_DEFAULTS,
             "cooldown_minutes": _env_cooldown_minutes(),
             "webhook_url": None,
+            "summary_webhook_url": None,
+            "summary_webhook_inherited": False,
             "updated_at": None,
             "source": "default",
         }
@@ -402,9 +438,20 @@ def save_alert_settings(device_id, values):
     conn = _connect()
     try:
         _ensure_tables(conn)
+        # Serialize the whole read/merge/write, not only UPDATE. Otherwise two
+        # partial saves can overwrite each other's omitted webhook fields or
+        # both attempt the first INSERT for the same device.
+        conn.execute("BEGIN IMMEDIATE")
         existing = _read_settings(conn, target)
         # 부분 갱신을 허용한다. 화면이 항상 전체 필드를 보내지 않아도 되게 하기 위함이다.
         current = _settings_row_to_dict(existing, target)
+        if existing is None and target != GLOBAL_SETTINGS_ID:
+            # The UI hides inherited secrets and omits unchanged URL fields.
+            # A first device override must preserve what was actually in use,
+            # rather than reset inherited alert routing and rules to defaults.
+            current = _settings_row_to_dict(_read_settings(conn, GLOBAL_SETTINGS_ID), target)
+            # Summary URLs have field-level inheritance; do not freeze a copy.
+            current["summary_webhook_url"] = None
 
         toggles = []
         for field in ALERT_TOGGLE_FIELDS:
@@ -415,6 +462,9 @@ def save_alert_settings(device_id, values):
         webhook = values.get("webhook_url", current["webhook_url"])
         if isinstance(webhook, str):
             webhook = webhook.strip() or None
+        summary_webhook = values.get("summary_webhook_url", current["summary_webhook_url"])
+        if isinstance(summary_webhook, str):
+            summary_webhook = summary_webhook.strip() or None
         rules = [values.get(field, current[field]) for field in ALERT_RULE_FIELDS]
         rules = [
             (1 if value else 0) if field in ALERT_RULE_BOOLEAN_FIELDS else value
@@ -426,12 +476,12 @@ def save_alert_settings(device_id, values):
                 f"""
                 INSERT INTO alert_settings (
                     device_id, {', '.join(ALERT_TOGGLE_FIELDS)},
-                    cooldown_minutes, webhook_url, {', '.join(ALERT_RULE_FIELDS)},
+                    cooldown_minutes, webhook_url, summary_webhook_url, {', '.join(ALERT_RULE_FIELDS)},
                     updated_at
-                ) VALUES (?, {', '.join('?' * len(ALERT_TOGGLE_FIELDS))}, ?, ?,
+                ) VALUES (?, {', '.join('?' * len(ALERT_TOGGLE_FIELDS))}, ?, ?, ?,
                     {', '.join('?' * len(ALERT_RULE_FIELDS))}, ?)
                 """,
-                (target, *toggles, cooldown, webhook, *rules, now),
+                (target, *toggles, cooldown, webhook, summary_webhook, *rules, now),
             )
         else:
             assignments = ", ".join(f"{field} = ?" for field in ALERT_TOGGLE_FIELDS)
@@ -439,11 +489,11 @@ def save_alert_settings(device_id, values):
             conn.execute(
                 f"""
                 UPDATE alert_settings
-                SET {assignments}, cooldown_minutes = ?, webhook_url = ?,
+                SET {assignments}, cooldown_minutes = ?, webhook_url = ?, summary_webhook_url = ?,
                     {rule_assignments}, updated_at = ?
                 WHERE device_id = ?
                 """,
-                (*toggles, cooldown, webhook, *rules, now, target),
+                (*toggles, cooldown, webhook, summary_webhook, *rules, now, target),
             )
         conn.commit()
         return _resolve_settings(conn, target)
@@ -470,7 +520,9 @@ def delete_alert_settings(device_id):
         return deleted > 0
     except sqlite3.Error:
         conn.rollback()
-        return False
+        # False means no override existed (HTTP 404), which the UI treats as
+        # an already-completed reset. Storage failures must become HTTP 503.
+        raise
     finally:
         conn.close()
 
@@ -737,21 +789,19 @@ def _record_recovery_events(
         messages.append(message)
 
 
-def _enqueue_notification(conn, device_id, message, created_at=None, payload=None):
+def _enqueue_notification(conn, device_id, message, created_at=None, notification_type="alert", payload=None):
     created_at = created_at or _now_string()
-    conn.execute(
+    # Rich reports are one complete card. Legacy text jobs retain per-part retries.
+    parts = [message] if payload else split_discord_message(message)
+    serialized_payload = json.dumps(payload, ensure_ascii=False) if payload else None
+    conn.executemany(
         """
         INSERT INTO notification_outbox (
-            device_id, message, payload, status, attempts, next_attempt_at, created_at
-        ) VALUES (?, ?, ?, 'pending', 0, ?, ?)
+            device_id, message, status, attempts, next_attempt_at, created_at, notification_type, payload
+        ) VALUES (?, ?, 'pending', 0, ?, ?, ?, ?)
         """,
-        (
-            device_id,
-            message,
-            json.dumps(payload, ensure_ascii=False) if payload else None,
-            created_at,
-            created_at,
-        ),
+        [(device_id, part, created_at, created_at, notification_type, serialized_payload)
+         for part in parts],
     )
 
 
@@ -802,6 +852,20 @@ def deliver_pending_notifications(limit=20):
             if job is None:
                 conn.commit()
                 break
+            # Upgrade oversized jobs queued by older versions atomically.
+            # Each part has its own retry state, without a schema migration.
+            job = dict(job)
+            payload = _load_payload(job.get("payload"))
+            parts = [job["message"]] if payload else split_discord_message(job["message"])
+            if len(parts) > 1:
+                conn.execute(
+                    "UPDATE notification_outbox SET message = ? WHERE id = ?",
+                    (parts[0], job["id"]),
+                )
+                for part in parts[1:]:
+                    _enqueue_notification(conn, job["device_id"], part, job["created_at"],
+                                          job["notification_type"])
+                job["message"] = parts[0]
             claimed = conn.execute(
                 """
                 UPDATE notification_outbox
@@ -817,12 +881,22 @@ def deliver_pending_notifications(limit=20):
         finally:
             conn.close()
 
-        settings = get_alert_settings(job["device_id"])
-        ok = send_discord_message(
-            job["message"],
-            webhook_url=settings.get("webhook_url"),
-            payload=_load_payload(job.get("payload")),
-        )
+        failure_reason = "Discord delivery failed"
+        try:
+            settings = get_alert_settings(job["device_id"], strict=True)
+        except sqlite3.Error:
+            # Unknown destination is not the same as an unset destination.
+            # Retry later instead of leaking a report to the environment URL.
+            ok = False
+            failure_reason = "Alert settings unavailable"
+        else:
+            webhook_url = settings.get("webhook_url")
+            if job["notification_type"] == "summary":
+                webhook_url = settings.get("summary_webhook_url") or webhook_url
+            kwargs = {"webhook_url": webhook_url}
+            if payload:
+                kwargs["payload"] = payload
+            ok = send_discord_message(job["message"], **kwargs)
         conn = _connect()
         try:
             attempts = int(job["attempts"] or 0) + 1
@@ -854,7 +928,7 @@ def deliver_pending_notifications(limit=20):
                         "failed" if failed else "pending",
                         attempts,
                         next_attempt,
-                        "Discord delivery failed",
+                        failure_reason,
                         job["id"],
                     ),
                 )
@@ -1793,7 +1867,7 @@ def queue_due_summaries(now=None):
                 ).rowcount
                 if not inserted:
                     continue
-                _enqueue_notification(conn, device_id, message, payload=payload)
+                _enqueue_notification(conn, device_id, message, notification_type="summary", payload=payload)
                 queued += 1
                 # 발송 이력과 outbox를 함께 확정하고 다음 요약 조회 전에 쓰기 잠금을 푼다.
                 conn.commit()

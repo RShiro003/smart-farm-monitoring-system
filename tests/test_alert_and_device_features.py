@@ -567,6 +567,14 @@ class EventLogApiTests(_BaseCase):
 
 
 class DeviceStatusTests(_BaseCase):
+    def test_thirty_second_cadence_does_not_mark_device_offline(self):
+        self._insert_row_at(
+            "slow_sensor", datetime.now() - timedelta(seconds=31), soil_moisture=50
+        )
+        with mock.patch.dict(os.environ, {"DEVICE_OFFLINE_SECONDS": "120"}):
+            entry = sensor_service.list_device_status("slow_sensor")[0]
+        self.assertEqual(entry["status"], "online")
+
     def test_recent_device_is_online(self):
         self._post_sensor()
         body = self.client.get("/api/dashboard/device-status").get_json()

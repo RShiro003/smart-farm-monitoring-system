@@ -21,6 +21,8 @@ const unsigned long SENSOR_SEND_INTERVAL_MS = 30000;
 // 임계값은 사용자가 대시보드에서 바꿀 수 있으므로 주기적으로 서버에서 다시 가져온다.
 // 확인은 loop 시작 시에만 하므로 실제로는 전송 2주기(약 60초)마다 조회된다.
 const unsigned long THRESHOLD_FETCH_INTERVAL_MS = 45000;
+unsigned long lastSensorSampleAt = 0;
+bool sensorSampleStarted = false;
 // 네트워크가 불안정할 때 loop가 오래 멈추지 않도록 HTTP/Wi-Fi 대기 시간을 제한한다.
 const unsigned long HTTP_TIMEOUT_MS = 3000;
 const unsigned long WIFI_CONNECT_TIMEOUT_MS = 15000;
@@ -371,15 +373,6 @@ void updateStatusLED(FarmStatus status) {
   }
 }
 
-void waitForNextSample(unsigned long loopStartedAt) {
-  // 고정 delay를 쓰면 Wi-Fi 재연결·HTTP 대기 시간만큼 주기가 늘어난다.
-  // 이번 loop가 이미 쓴 시간을 빼고 남은 만큼만 기다려 전송 간격을 30초로 유지한다.
-  unsigned long elapsed = millis() - loopStartedAt;
-  if (elapsed < SENSOR_SEND_INTERVAL_MS) {
-    delay(SENSOR_SEND_INTERVAL_MS - elapsed);
-  }
-}
-
 void setup() {
   // 부팅 직후 Serial과 센서/핀을 초기화한다.
   // LED는 먼저 모두 꺼서 이전 전원 상태가 남아 보이지 않게 한다.
@@ -410,13 +403,20 @@ void setup() {
 }
 
 void loop() {
+  // 실제 직전 측정 시작부터 최소 30초를 기다린다.
+  // unsigned 차분으로 millis() 순환에 대응하며, 지연된 주기를 몰아서 실행하지 않는다.
+  unsigned long cycleNow = millis();
+  if (sensorSampleStarted && cycleNow - lastSensorSampleAt < SENSOR_SEND_INTERVAL_MS) {
+    delay(10);
+    return;
+  }
+
   // 메인 루프 흐름:
   // 1) Wi-Fi 상태 확인 및 재연결
   // 2) 서버 임계값 주기적 조회
   // 3) 센서값 측정
   // 4) 임계값으로 LED 상태 판단
   // 5) JSON 생성 후 Flask /api/sensor로 POST
-  unsigned long loopStartedAt = millis();
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("WiFi disconnected. Reconnecting...");
     connectWiFi();
@@ -429,7 +429,7 @@ void loop() {
   if (WiFi.status() == WL_CONNECTED &&
       (!thresholdFetchAttempted ||
        now - lastThresholdFetchAt >= THRESHOLD_FETCH_INTERVAL_MS)) {
-    // 부팅 후 최초 1회, 이후 45초마다 서버 임계값을 가져온다.
+    // 부팅 후 최초 1회, 이후 45초 이상 지난 측정 주기에 서버 임계값을 가져온다.
     // 사용자가 대시보드에서 기준값을 바꾸면 다음 조회 시 ESP32 LED 판단에도 반영된다.
     lastThresholdFetchAt = now;
     thresholdFetchAttempted = true;
@@ -437,6 +437,11 @@ void loop() {
   }
 
   String timestamp = getTimestamp();
+
+  // Wi-Fi/NTP/임계값 조회가 지연되어도 다음 측정이 앞당겨지지 않도록
+  // 블로킹 작업이 끝난 뒤, 실제 센서를 읽기 직전에 기준 시각을 기록한다.
+  lastSensorSampleAt = millis();
+  sensorSampleStarted = true;
 
   // DHT22 온도/습도 측정.
   // 실패하면 -1로 보내 서버/대시보드에서 비정상 데이터임을 확인할 수 있게 한다.
@@ -533,7 +538,6 @@ void loop() {
     if (WiFi.status() != WL_CONNECTED) {
       enqueueSensorPayload(jsonData);
       Serial.println("WiFi disconnected. Sensor sample queued.");
-      waitForNextSample(loopStartedAt);
       return;
     }
 
@@ -563,5 +567,4 @@ void loop() {
     http.end();
   }
 
-  waitForNextSample(loopStartedAt);
 }

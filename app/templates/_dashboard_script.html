@@ -2101,15 +2101,22 @@ async function loadAlertSettings() {
             const input = document.getElementById(id);
             if (input) input.checked = Boolean(value);
         }
-        const webhook = document.getElementById('alert-webhook');
-        if (webhook) {
-            webhook.value = '';
-            webhook.placeholder = data.settings?.webhook_configured
-                ? '기존 웹훅이 설정되어 있습니다 (변경할 때만 입력)'
-                : '비우면 서버 환경변수를 사용합니다';
+        for (const [id, flag, fallback] of [
+            ['alert-webhook', 'webhook_configured', '미설정 시 서버 환경변수 사용'],
+            ['alert-summary-webhook', 'summary_webhook_configured', '미설정 시 전체 요약 설정 또는 일반 알림 웹훅 사용'],
+        ]) {
+            const webhook = document.getElementById(id);
+            if (webhook) {
+                webhook.value = '';
+                webhook.placeholder = data.settings?.[flag]
+                    ? (id === 'alert-summary-webhook' && data.settings?.summary_webhook_inherited
+                        ? '전체 요약 웹훅 사용 중 (이 장치만 변경할 때 입력)'
+                        : '기존 웹훅이 설정되어 있습니다 (변경할 때만 입력)')
+                    : fallback;
+            }
+            const clearWebhook = document.getElementById(`${id}-clear`);
+            if (clearWebhook) clearWebhook.checked = false;
         }
-        const clearWebhook = document.getElementById('alert-webhook-clear');
-        if (clearWebhook) clearWebhook.checked = false;
 
         const sourceEl = document.getElementById('alert-settings-source');
         if (sourceEl) {
@@ -2163,10 +2170,15 @@ async function saveAlertSettings() {
     payload.daily_summary = Boolean(document.getElementById('alert-daily-summary')?.checked);
     payload.weekly_summary = Boolean(document.getElementById('alert-weekly-summary')?.checked);
 
-    const webhookValue = (document.getElementById('alert-webhook')?.value ?? '').trim();
-    const clearWebhook = document.getElementById('alert-webhook-clear')?.checked;
-    if (clearWebhook) payload.webhook_url = null;
-    else if (webhookValue) payload.webhook_url = webhookValue;
+    for (const [id, field] of [
+        ['alert-webhook', 'webhook_url'],
+        ['alert-summary-webhook', 'summary_webhook_url'],
+    ]) {
+        const value = (document.getElementById(id)?.value ?? '').trim();
+        const clear = document.getElementById(`${id}-clear`)?.checked;
+        if (clear) payload[field] = null;
+        else if (value) payload[field] = value;
+    }
 
     setAlertMessage('저장 중...');
     try {

@@ -221,3 +221,94 @@ test('401 opens authentication UI and failed requests clean up', async () => {
     assert.equal(opened, true);
     assert.equal(run('Object.keys(REQUESTS).length'), 0);
 });
+
+test('alert settings show both webhook states without displaying secret URLs', async () => {
+    const { context, element } = dashboard();
+    context.fetchJson = async () => ({settings: {
+        webhook_configured: true, summary_webhook_configured: true,
+        summary_webhook_inherited: true,
+    }});
+    for (const id of ['alert-webhook', 'alert-summary-webhook']) {
+        element(id).value = 'previous-secret';
+        element(`${id}-clear`).checked = true;
+    }
+    await context.loadAlertSettings();
+    assert.equal(element('alert-webhook').value, '');
+    assert.equal(element('alert-summary-webhook').value, '');
+    assert.match(element('alert-webhook').placeholder, /설정되어 있습니다/);
+    assert.match(element('alert-summary-webhook').placeholder, /전체 요약 웹훅 사용 중/);
+    assert.equal(element('alert-webhook-clear').checked, false);
+    assert.equal(element('alert-summary-webhook-clear').checked, false);
+});
+
+test('webhook inputs save independently and blank inputs preserve stored URLs', async () => {
+    const { context, element } = dashboard();
+    for (const [id, value] of Object.entries({
+        'alert-abnormal-count': '1', 'alert-duration': '0',
+        'alert-recovery-count': '1', 'alert-danger-percent': '25',
+        'alert-summary-hour': '8', 'alert-summary-weekday': '0',
+    })) element(id).value = value;
+    context.loadAlertSettings = async () => {};
+    let payload;
+    context.fetch = async (url, options) => {
+        assert.equal(url, '/api/alert-settings');
+        payload = JSON.parse(options.body);
+        return {ok: true, json: async () => ({})};
+    };
+    element('alert-webhook').value = ' https://discord.com/api/webhooks/alert/token ';
+    element('alert-summary-webhook').value = ' https://discord.com/api/webhooks/summary/token ';
+    await context.saveAlertSettings();
+    assert.equal(payload.webhook_url, 'https://discord.com/api/webhooks/alert/token');
+    assert.equal(payload.summary_webhook_url, 'https://discord.com/api/webhooks/summary/token');
+    element('alert-webhook').value = '';
+    element('alert-summary-webhook').value = '  ';
+    await context.saveAlertSettings();
+    assert.equal('webhook_url' in payload, false);
+    assert.equal('summary_webhook_url' in payload, false);
+    element('alert-summary-webhook-clear').checked = true;
+    await context.saveAlertSettings();
+    assert.equal('webhook_url' in payload, false);
+    assert.equal(payload.summary_webhook_url, null);
+    element('alert-summary-webhook-clear').checked = false;
+    element('alert-webhook-clear').checked = true;
+    await context.saveAlertSettings();
+    assert.equal(payload.webhook_url, null);
+    assert.equal('summary_webhook_url' in payload, false);
+});
+
+test('settings load failure displays an error without erasing webhook edits', async () => {
+    const { context, element } = dashboard();
+    context.fetch = async () => ({
+        ok: false, status: 503,
+        json: async () => ({error: 'Database temporarily unavailable'}),
+    });
+    element('alert-webhook').value = 'unsaved-alert-url';
+    element('alert-summary-webhook').value = 'unsaved-summary-url';
+    let message, kind;
+    context.setAlertMessage = (text, type) => { message = text; kind = type; };
+    await context.loadAlertSettings();
+    assert.equal(kind, 'error');
+    assert.match(message, /불러오지 못했습니다/);
+    assert.equal(element('alert-webhook').value, 'unsaved-alert-url');
+    assert.equal(element('alert-summary-webhook').value, 'unsaved-summary-url');
+});
+
+test('failed settings reset stays an error without reloading or clearing inputs', async () => {
+    const { context, element } = dashboard();
+    context.confirm = () => true;
+    context.fetch = async (_, options) => {
+        assert.equal(options.method, 'DELETE');
+        return {ok: false, status: 503};
+    };
+    let reloads = 0;
+    context.loadAlertSettings = () => { reloads++; };
+    const messages = [];
+    context.setAlertMessage = (text, type) => messages.push({text, type});
+    element('alert-summary-webhook').value = 'unsaved-summary-url';
+    await context.resetAlertSettings();
+    assert.equal(reloads, 0);
+    assert.equal(messages.length, 1);
+    assert.equal(messages[0].type, 'error');
+    assert.match(messages[0].text, /되돌리기에 실패했습니다/);
+    assert.equal(element('alert-summary-webhook').value, 'unsaved-summary-url');
+});
